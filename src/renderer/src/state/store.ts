@@ -58,6 +58,8 @@ interface State extends UiPrefs {
   paletteOpen: boolean
   toasts: Toast[]
   drafts: Record<string, Draft>
+  /** Messages typed while the agent was busy; sent automatically when the turn ends. */
+  queued: Record<string, Draft>
   lightbox: string | null
   backupProgress: { phase: string; done: number; total: number } | null
   browserUrl: string
@@ -102,6 +104,7 @@ export const useApp = create<State>(() => ({
   paletteOpen: false,
   toasts: [],
   drafts: loadDrafts(),
+  queued: {},
   lightbox: null,
   backupProgress: null,
   browserUrl: '',
@@ -211,12 +214,23 @@ export function onCommand(fn: (name: string) => void): void {
 
 function handleEvent(e: DuetEvent): void {
   switch (e.type) {
-    case 'thread-meta':
+    case 'thread-meta': {
+      const before = get().threads[e.meta.id]
       set((s) => ({ threads: { ...s.threads, [e.meta.id]: e.meta } }))
+      const wasBusy = before && (before.status === 'running' || before.status === 'approval')
+      const pending = get().queued[e.meta.id]
+      if (wasBusy && e.meta.status === 'idle' && pending) {
+        clearQueued(e.meta.id)
+        void sendMessage(e.meta.id, pending).catch((error) => {
+          queueMessage(e.meta.id, pending)
+          toastError(error)
+        })
+      }
       if (e.meta.unread && get().currentId === e.meta.id && get().view === 'thread' && document.hasFocus()) {
         void duet.threads.update(e.meta.id, { unread: false }).catch(() => undefined)
       }
       break
+    }
     case 'thread-removed':
       set((s) => {
         const threads = { ...s.threads }
@@ -438,6 +452,25 @@ export function clearDraft(key: string): void {
     const drafts = { ...s.drafts }
     delete drafts[key]
     return { drafts }
+  })
+}
+
+export function queueMessage(threadId: string, draft: Draft): void {
+  set((s) => {
+    const existing = s.queued[threadId]
+    const merged: Draft = existing
+      ? { text: [existing.text, draft.text].filter(Boolean).join('\n\n'), attachments: [...existing.attachments, ...draft.attachments] }
+      : draft
+    return { queued: { ...s.queued, [threadId]: merged } }
+  })
+}
+
+export function clearQueued(threadId: string): void {
+  set((s) => {
+    if (!s.queued[threadId]) return {}
+    const queued = { ...s.queued }
+    delete queued[threadId]
+    return { queued }
   })
 }
 

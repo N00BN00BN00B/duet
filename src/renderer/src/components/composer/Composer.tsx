@@ -3,7 +3,7 @@ import type { AccessMode, Attachment, FileSuggestion, ProviderId, SlashCommand, 
 import { PROVIDER_LABEL } from '@shared/types'
 import { duet, errorMessage } from '@/lib/api'
 import { tildify } from '@/lib/format'
-import { createAndSend, saveSettings, sendMessage, setAccess, setDraft, clearDraft, stopThread, switchProvider, toastError, updateThread, useApp, type Draft } from '@/state/store'
+import { clearQueued, createAndSend, queueMessage, saveSettings, sendMessage, setAccess, setDraft, clearDraft, stopThread, switchProvider, toastError, updateThread, useApp, type Draft } from '@/state/store'
 import { IconArrowUp, IconFile, IconFolder, IconPaperclip, IconStop, IconX } from '../icons'
 import { AccessMenu, ContextRing, EffortMenu, ModelMenu, ProviderSwitch } from './pickers'
 import { ApprovalPanel } from './ApprovalPanel'
@@ -38,6 +38,7 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
   const key = mode === 'thread' && meta ? meta.id : 'home'
   const draft = useApp((s) => s.drafts[key]) ?? EMPTY
   const items = useApp((s) => (meta ? s.items[meta.id] : undefined))
+  const queued = useApp((s) => (meta ? s.queued[meta.id] : undefined))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [dragging, setDragging] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -160,9 +161,16 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
   }
 
   const submit = async () => {
-    if (busy || running) return
+    if (busy) return
     const text = draft.text.trim()
     if (!text && draft.attachments.length === 0) return
+    if (running && meta) {
+      // The agent is busy: queue it and send automatically when the turn ends.
+      queueMessage(meta.id, { text, attachments: draft.attachments })
+      clearDraft(key)
+      setPopup(null)
+      return
+    }
     if (status && !status.installed) {
       toastError(`${PROVIDER_LABEL[provider]} isn't installed. Switch agents or set it up in Settings.`)
       return
@@ -242,7 +250,7 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
   }
 
   const canSend = (draft.text.trim().length > 0 || draft.attachments.length > 0) && !busy
-  const placeholder = running ? `${PROVIDER_LABEL[provider]} is working… press Esc to stop` : mode === 'home' ? `Ask ${PROVIDER_LABEL[provider]} to build, fix or explain something` : `Message ${PROVIDER_LABEL[provider]}`
+  const placeholder = running ? `${PROVIDER_LABEL[provider]} is working… type to queue a follow-up, Esc to stop` : mode === 'home' ? `Ask ${PROVIDER_LABEL[provider]} to build, fix or explain something` : `Message ${PROVIDER_LABEL[provider]}`
 
   return (
     <div className="relative">
@@ -290,6 +298,25 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
         {dragging && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] bg-[color-mix(in_srgb,var(--accent)_10%,var(--surface))] text-[13px] font-medium text-accent">
             Drop files to attach
+          </div>
+        )}
+        {queued && meta && (
+          <div className="anim-fade mx-3 mt-3 flex items-center gap-2 rounded-xl border border-line bg-surface-2 px-3 py-2 text-[12px]" data-testid="queued-message">
+            <span className="shrink-0 text-fg-3">Queued · sends when {PROVIDER_LABEL[provider]} finishes</span>
+            <span className="min-w-0 flex-1 truncate text-fg-2">{queued.text || `${queued.attachments.length} attachment(s)`}</span>
+            <button
+              type="button"
+              onClick={() => {
+                clearQueued(meta.id)
+                setDraft(key, { text: [queued.text, draft.text].filter(Boolean).join('\n\n'), attachments: [...queued.attachments, ...draft.attachments] })
+              }}
+              className="press shrink-0 rounded-md px-1.5 py-0.5 text-fg-3 hover:bg-hover hover:text-fg"
+            >
+              Edit
+            </button>
+            <button type="button" aria-label="Discard queued message" onClick={() => clearQueued(meta.id)} className="press shrink-0 rounded-md p-0.5 text-fg-3 hover:bg-hover hover:text-fg">
+              <IconX size={12} />
+            </button>
           </div>
         )}
         {draft.attachments.length > 0 && (
@@ -353,6 +380,18 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
             <IconButton label="Attach files or images" onClick={() => void pickFiles()}>
               <IconPaperclip size={16} />
             </IconButton>
+            {running && meta && canSend && (
+              <button
+                type="button"
+                aria-label="Queue message"
+                title="Send when the agent finishes"
+                onClick={() => void submit()}
+                data-testid="queue-button"
+                className="press flex h-8 w-8 items-center justify-center rounded-full border border-line-strong bg-surface-2 text-fg hover:bg-surface-3"
+              >
+                <IconArrowUp size={16} strokeWidth={2.2} />
+              </button>
+            )}
             {running && meta ? (
               <button
                 type="button"

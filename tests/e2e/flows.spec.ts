@@ -122,6 +122,22 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await expect(page.getByTestId('timeline')).toContainText('Stopped')
   })
 
+  test('a follow-up typed while the agent works is queued and sent afterwards', async () => {
+    const { page } = ctx
+    await send(page, 'please run the suite once more')
+    await expect(page.getByTestId('approval-panel')).toBeVisible({ timeout: 20_000 })
+    const input = page.getByTestId('composer-input')
+    await input.fill('and then summarize the results')
+    await page.getByTestId('queue-button').click()
+    await expect(page.getByTestId('queued-message')).toContainText('summarize the results')
+    await expect(input).toHaveValue('')
+    await page.getByTestId('approval-allow').click()
+    // The queued message goes out by itself once the first turn ends.
+    await expect(page.getByTestId('timeline')).toContainText('You said: “and then summarize the results”', { timeout: 20_000 })
+    await expect(page.getByTestId('queued-message')).toBeHidden()
+    await waitIdle(page)
+  })
+
   test('image attachment via paste reaches the agent', async () => {
     const { page } = ctx
     await page.getByTestId('composer-input').click()

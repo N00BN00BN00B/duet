@@ -161,6 +161,32 @@ describe.skipIf(!LIVE)('live: Claude Code', () => {
     expect(text(c).toLowerCase()).toContain('red')
   }, 240_000)
 
+  it('plan mode: proposes a plan, then builds after approval', async () => {
+    const c = collector()
+    const plans: TimelineItem[] = []
+    const accessChanges: string[] = []
+    const origEmit = c.emit
+    c.emit = (e) => {
+      if (e.type === 'access') accessChanges.push(e.access)
+      origEmit(e)
+    }
+    c.onApproval = (item) => {
+      if (item.kind === 'approval' && item.request === 'plan') plans.push(item)
+      // Approve the plan and let it auto-edit; allow anything else it asks for.
+      setTimeout(() => claude.respond('live-plan', item.id, { kind: item.kind === 'approval' && item.request === 'plan' ? 'allow-session' : 'allow' }), 50)
+    }
+    await claude.startTurn(
+      { threadId: 'live-plan', cwd: project, model: CLAUDE_MODEL, access: 'plan', attachments: [], text: 'I want a file notes.txt containing exactly: planned. Make a one-step plan, present it with ExitPlanMode, and once approved create the file.' },
+      c.emit
+    )
+    const end = await c.done
+    expect(end.status).toBe('completed')
+    expect(plans.length).toBeGreaterThanOrEqual(1)
+    expect(plans[0]).toMatchObject({ request: 'plan' })
+    expect(accessChanges).toContain('auto')
+    expect(readFileSync(join(project, 'notes.txt'), 'utf8').trim()).toBe('planned')
+  }, 240_000)
+
   it('can be interrupted', async () => {
     const c = collector()
     await claude.startTurn({ threadId: 'live-4', cwd: project, model: CLAUDE_MODEL, access: 'full', attachments: [], text: 'Run the shell command `sleep 45` with the Bash tool, then reply: finished' }, c.emit)
