@@ -197,7 +197,7 @@ export function Onboarding() {
                 <ProviderLogo provider={p} size={16} />
                 <span className="flex-1 text-[13px] font-medium">{PROVIDER_LABEL[p]}</span>
                 <span className={`text-[12px] ${!st ? 'text-fg-3' : st.installed ? (st.loggedIn === false ? 'text-warn' : 'text-ok') : 'text-bad'}`}>
-                  {!st ? 'Checking…' : !st.installed ? 'Not found — see Settings' : st.loggedIn === false ? 'Installed · signed out' : `Ready${st.version ? ` · v${st.version}` : ''}`}
+                  {!st ? 'Checking…' : !st.installed ? 'Not found — see Settings' : st.loggedIn === false ? 'Installed · signed out' : `Ready${st.version ? ` · ${/^\d/.test(st.version) ? 'v' : ''}${st.version}` : ''}`}
                 </span>
               </div>
             )

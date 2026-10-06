@@ -50,7 +50,7 @@ function AgentCard({ id }: { id: ProviderId }) {
             )}
           </div>
           <div className="mt-0.5 truncate text-[12px] text-fg-3">
-            {[status?.version && `v${status.version}`, status?.account, status?.plan].filter(Boolean).join(' · ') || (status?.installed === false ? 'CLI not found on this Mac' : '')}
+            {[status?.version && (/^\d/.test(status.version) ? `v${status.version}` : status.version), status?.account, status?.plan].filter(Boolean).join(' · ') || (status?.installed === false ? 'CLI not found on this Mac' : '')}
           </div>
         </div>
         <Button size="sm" variant="ghost" onClick={() => void refresh()} icon={refreshing ? <Spinner size={13} /> : <IconRefresh size={13} />}>

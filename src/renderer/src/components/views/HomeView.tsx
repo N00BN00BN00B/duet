@@ -21,7 +21,7 @@ function AgentStatusPill({ id }: { id: ProviderId }) {
         {st && (!st.installed || st.error) ? <IconWarning size={11} /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
         {text}
       </span>
-      {st?.version && <span className="text-fg-3">v{st.version}</span>}
+      {st?.version && <span className="text-fg-3">{/^\d/.test(st.version) ? `v${st.version}` : st.version}</span>}
     </button>
   )
 }
