@@ -166,6 +166,9 @@ test.describe.serial('Duet 2: look, commands, sync, usage, command line', () => 
 
   test('effort and model sliders: drag, click and keys', async () => {
     const { page } = ctx
+    // The previous deep-link check leaves a notice over the bottom-right controls.
+    const notices = page.getByRole('status').getByRole('button', { name: 'Dismiss' })
+    while (await notices.count()) await notices.first().click()
     /** Where stop `i` of `n` sits on a slider track (the knob's centre runs 14px in from each end). */
     const stopX = async (testId: string, i: number, n: number) => {
       const track = page.getByTestId(testId).getByRole('slider')
