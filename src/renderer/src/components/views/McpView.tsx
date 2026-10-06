@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { McpEntry, McpServerConfig, McpTransport, ProviderId } from '@shared/types'
+import type { McpEditSource, McpEntry, McpServerConfig, McpTransport, ProviderId } from '@shared/types'
 import { PROVIDER_LABEL, PROVIDERS } from '@shared/types'
 import { duet, errorMessage } from '@/lib/api'
 import { toast, toastError, useApp } from '@/state/store'
@@ -63,7 +63,22 @@ function KeyValueEditor({ rows, onChange, keyLabel, valueLabel }: { rows: KV[]; 
   )
 }
 
-function ServerDialog({ open, onClose, initial, initialTargets, onSaved }: { open: boolean; onClose: () => void; initial: McpServerConfig | null; initialTargets: ProviderId[]; onSaved: () => void }) {
+function ServerDialog({
+  open,
+  onClose,
+  initial,
+  initialTargets,
+  source,
+  onSaved
+}: {
+  open: boolean
+  onClose: () => void
+  initial: McpServerConfig | null
+  initialTargets: ProviderId[]
+  /** Where the edited server lives, so Claude's copy is changed in its own scope. */
+  source?: McpEditSource
+  onSaved: () => void
+}) {
   const [name, setName] = useState('')
   const [transport, setTransport] = useState<McpTransport>('stdio')
   const [command, setCommand] = useState('')
@@ -98,7 +113,7 @@ function ServerDialog({ open, onClose, initial, initialTargets, onSaved }: { ope
         ? { name: name.trim(), transport, command: command.trim(), args: splitArgs(args), env: fromRows(env) }
         : { name: name.trim(), transport: initial?.transport === 'sse' ? 'sse' : 'http', url: url.trim(), headers: fromRows(headers), bearerTokenEnvVar: bearer.trim() || undefined }
     try {
-      await duet.mcp.save(config, targets, initial?.name)
+      await duet.mcp.save(config, targets, initial ? (source ?? { name: initial.name }) : undefined)
       toast(`Saved ${config.name} to ${targets.map((t) => PROVIDER_LABEL[t]).join(' and ')}`, 'success')
       onSaved()
       onClose()
@@ -279,7 +294,7 @@ function StatusCell({ entry, provider, onCopy, copying }: { entry?: McpEntry; pr
 export function McpView() {
   const [entries, setEntries] = useState<McpEntry[] | null>(null)
   const [loading, setLoading] = useState(false)
-  const [editing, setEditing] = useState<{ config: McpServerConfig | null; targets: ProviderId[] } | null>(null)
+  const [editing, setEditing] = useState<{ config: McpServerConfig | null; targets: ProviderId[]; source?: McpEditSource } | null>(null)
   const [importing, setImporting] = useState(false)
   const [copying, setCopying] = useState<string | null>(null)
   const [removing, setRemoving] = useState<Row | null>(null)
@@ -404,7 +419,16 @@ export function McpView() {
                 <StatusCell entry={row.claude} provider="claude" copying={copying === `${row.name}:claude`} onCopy={() => void copy(row, 'claude')} />
                 <StatusCell entry={row.codex} provider="codex" copying={copying === `${row.name}:codex`} onCopy={() => void copy(row, 'codex')} />
                 <div className="flex w-[60px] justify-end gap-0.5 opacity-0 transition-opacity group-hover/m:opacity-100 focus-within:opacity-100">
-                  <IconButton label="Edit" onClick={() => setEditing({ config: (row.claude ?? row.codex)!.config, targets: PROVIDERS.filter((p) => (p === 'claude' ? !!row.claude : !!row.codex)) })}>
+                  <IconButton
+                    label="Edit"
+                    onClick={() =>
+                      setEditing({
+                        config: (row.claude ?? row.codex)!.config,
+                        targets: PROVIDERS.filter((p) => (p === 'claude' ? !!row.claude : !!row.codex)),
+                        source: { name: row.name, claudeScope: row.claude?.scope, project: row.claude?.project }
+                      })
+                    }
+                  >
                     <IconPencil size={14} />
                   </IconButton>
                   <IconButton label="Remove" onClick={() => setRemoving(row)}>
@@ -430,7 +454,7 @@ export function McpView() {
           </Card>
         </Section>
       )}
-      <ServerDialog open={!!editing} onClose={() => setEditing(null)} initial={editing?.config ?? null} initialTargets={editing?.targets ?? []} onSaved={() => void load()} />
+      <ServerDialog open={!!editing} onClose={() => setEditing(null)} initial={editing?.config ?? null} initialTargets={editing?.targets ?? []} source={editing?.source} onSaved={() => void load()} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} onDone={() => void load()} />
       <Dialog
         open={!!removing}

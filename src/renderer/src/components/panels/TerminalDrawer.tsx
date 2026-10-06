@@ -67,7 +67,7 @@ function themeFor(dark: boolean) {
       }
 }
 
-function TerminalPane({ tab, active }: { tab: Tab; active: boolean }) {
+function TerminalPane({ tab, active, visible }: { tab: Tab; active: boolean; visible: boolean }) {
   const host = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -145,17 +145,19 @@ function TerminalPane({ tab, active }: { tab: Tab; active: boolean }) {
   }, [tab.cwd, tab.run])
 
   useEffect(() => {
-    if (active) {
-      requestAnimationFrame(() => {
-        try {
-          fitRef.current?.fit()
-        } catch {
-          // ignore
-        }
-        termRef.current?.focus()
-      })
-    }
-  }, [active])
+    if (!visible) return
+    // Re-fit after being shown again: the panel may have been resized while hidden.
+    requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit()
+        const term = termRef.current
+        if (term && idRef.current) void duet.terminal.resize(idRef.current, term.cols, term.rows)
+      } catch {
+        // ignore
+      }
+      termRef.current?.focus()
+    })
+  }, [visible])
 
   return (
     <div className={`absolute inset-0 ${active ? 'visible' : 'invisible'}`}>
@@ -175,10 +177,18 @@ export function runInTerminal(command: string): void {
   window.dispatchEvent(new CustomEvent('duet:terminal-run'))
 }
 
-export function TerminalDrawer({ cwd }: { cwd: string }) {
+export function TerminalDrawer({ cwd, open }: { cwd: string; open: boolean }) {
   const height = useApp((s) => s.terminalHeight)
   const [tabs, setTabs] = useState<Tab[]>(() => [{ key: ++tabKey, cwd, title: projectName(cwd), run: pendingRuns.shift() }])
   const [active, setActive] = useState(tabs[0].key)
+
+  // Reopened after its last tab was closed: start a fresh shell.
+  useEffect(() => {
+    if (!open || tabs.length) return
+    const tab = { key: ++tabKey, cwd, title: projectName(cwd), run: pendingRuns.shift() }
+    setTabs([tab])
+    setActive(tab.key)
+  }, [open, tabs.length, cwd])
 
   useEffect(() => {
     const onRun = () => {
@@ -202,7 +212,7 @@ export function TerminalDrawer({ cwd }: { cwd: string }) {
   }
 
   return (
-    <div className="relative flex shrink-0 flex-col border-t border-line bg-bg" style={{ height }} data-testid="terminal-drawer">
+    <div className={`relative shrink-0 flex-col border-t border-line bg-bg ${open ? 'flex' : 'hidden'}`} style={{ height }} data-testid="terminal-drawer" aria-hidden={!open}>
       <div
         className="absolute -top-[3px] left-0 right-0 z-10 h-[6px] cursor-row-resize hover:bg-accent/30"
         onMouseDown={(e) => {
@@ -251,7 +261,7 @@ export function TerminalDrawer({ cwd }: { cwd: string }) {
       </div>
       <div className="relative min-h-0 flex-1">
         {tabs.map((t) => (
-          <TerminalPane key={t.key} tab={t} active={t.key === active} />
+          <TerminalPane key={t.key} tab={t} active={t.key === active} visible={open && t.key === active} />
         ))}
       </div>
     </div>

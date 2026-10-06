@@ -72,3 +72,27 @@ export function summarize(entries: WorkEntry[]): string {
   return parts.join(' · ') || 'Worked'
 }
 
+
+/**
+ * Applies a streamed chunk to a copy of the list. `offset` is where the chunk starts, so a chunk
+ * the item already contains (one that arrived again after a fresh snapshot) is never added twice.
+ * Returns null when nothing changes.
+ */
+export function applyDelta(list: TimelineItem[], itemId: string, field: 'text' | 'output', delta: string, offset?: number): TimelineItem[] | null {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const item = list[i]
+    if (item.id !== itemId) continue
+    const current = field === 'text' && (item.kind === 'assistant' || item.kind === 'reasoning') ? item.text : field === 'output' && item.kind === 'tool' ? (item.output ?? '') : null
+    if (current === null) return null
+    let add = delta
+    if (offset !== undefined && offset < current.length) {
+      const overlap = current.length - offset
+      if (overlap >= delta.length) return null
+      add = delta.slice(overlap)
+    }
+    const copy = list.slice()
+    copy[i] = (field === 'text' ? { ...item, text: current + add } : { ...item, output: current + add }) as TimelineItem
+    return copy
+  }
+  return null
+}

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { duet } from '@/lib/api'
 import { goHome, onCommand, openBrowser, saveSettings, setView, switchProvider, togglePanel, useApp } from '@/state/store'
 import { Sidebar } from './components/Sidebar'
@@ -21,7 +21,8 @@ function MainView() {
   const meta = useApp((s) => (s.currentId ? s.threads[s.currentId] : undefined))
   switch (view) {
     case 'thread':
-      return meta ? <ThreadView meta={meta} /> : <HomeView />
+      // Keyed so nothing typed, picked or in flight in one thread's composer shows up in another.
+      return meta ? <ThreadView key={meta.id} meta={meta} /> : <HomeView />
     case 'history':
       return <HistoryView />
     case 'mcp':
@@ -100,6 +101,9 @@ export function App() {
   const sidebarOpen = useApp((s) => s.sidebarOpen)
   const terminalOpen = useApp((s) => s.terminalOpen)
   const terminalCwd = useApp((s) => (s.view === 'thread' && s.currentId ? s.threads[s.currentId]?.cwd : s.homeProject) ?? s.info.home)
+  // Once opened, the terminal stays mounted (just hidden), so closing the panel never kills shells.
+  const [terminalUsed, setTerminalUsed] = useState(false)
+  if (terminalOpen && !terminalUsed) setTerminalUsed(true)
 
   useEffect(() => {
     onCommand((name) => {
@@ -176,7 +180,7 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <MainView />
         </div>
-        {terminalOpen && <TerminalDrawer cwd={terminalCwd} />}
+        {terminalUsed && <TerminalDrawer cwd={terminalCwd} open={terminalOpen} />}
       </main>
       <RightPanel />
       <CommandPalette />

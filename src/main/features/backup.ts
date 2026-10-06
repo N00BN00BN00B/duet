@@ -1,6 +1,7 @@
-import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { open, type FileHandle } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip, createGzip } from 'node:zlib'
 import * as tarStream from 'tar-stream'
@@ -39,6 +40,9 @@ interface SetSpec {
 }
 
 const SKIP_NAMES = new Set(['.DS_Store'])
+/** Never worth backing up, and huge when a linked skill points into a whole repository. */
+const SKIP_DIRS = new Set(['node_modules', '.git'])
+const CHUNK = 1024 * 1024
 const CODEX_DB = /^(state|thread_history|memories|goals|queue|logs)_\d+\.sqlite(-wal|-shm)?$/
 
 export const BACKUP_SETS: SetSpec[] = [
@@ -126,33 +130,47 @@ function excluded(path: string, excludes: string[]): boolean {
   return excludes.some((e) => within(path, e))
 }
 
+/**
+ * Lists the files of a set under their logical paths. Symlinks are followed, so a linked skill
+ * is backed up as its content and the archive stands on its own. A link that loops back, or
+ * leads to a folder holding the home folder or a data folder (say `skills/home -> ~`), is skipped.
+ */
 export function collectFiles(spec: SetSpec, ctx: BackupContext): { files: string[]; bytes: number } {
   const excludes = spec.exclude?.(ctx) ?? []
+  const guards = [ctx.home, ...Object.values(roots(ctx))].map(realish)
   const files: string[] = []
   let bytes = 0
-  const visit = (path: string) => {
-    if (excluded(path, excludes) || SKIP_NAMES.has(basename(path))) return
+  const visit = (path: string, ancestors: Set<string>) => {
+    const name = basename(path)
+    if (excluded(path, excludes) || SKIP_NAMES.has(name)) return
     let st
+    let linked = false
     try {
-      st = lstatSync(path)
+      linked = lstatSync(path).isSymbolicLink()
+      st = statSync(path)
     } catch {
-      return
+      return // gone, unreadable or a dangling link
     }
-    if (st.isSymbolicLink()) files.push(path)
-    else if (st.isDirectory()) {
-      let names: string[] = []
+    if (st.isDirectory()) {
+      if (SKIP_DIRS.has(name)) return
+      let real: string
+      let names: string[]
       try {
+        real = realpathSync(path)
         names = readdirSync(path)
       } catch {
         return
       }
-      for (const name of names.sort()) visit(join(path, name))
+      if (ancestors.has(real)) return
+      if (linked && guards.some((g) => within(g, real))) return
+      const inside = new Set(ancestors).add(real)
+      for (const child of names.sort()) visit(join(path, child), inside)
     } else if (st.isFile()) {
       files.push(path)
       bytes += st.size
     }
   }
-  for (const p of spec.paths(ctx)) visit(p)
+  for (const p of spec.paths(ctx)) visit(p, new Set())
   return { files, bytes }
 }
 
@@ -232,25 +250,80 @@ interface Manifest extends BackupInfo {
   roots: Record<RootKey, string>
 }
 
-function addEntry(pack: tarStream.Pack, header: Partial<tarStream.Header> & { name: string }, body?: { file?: string; data?: Buffer }): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    const done = (err?: Error | null) => (err ? reject(err) : resolvePromise())
-    if (body?.data) {
-      pack.entry(header, body.data, done)
-      return
-    }
-    if (!body?.file) {
-      pack.entry(header, done)
-      return
-    }
-    const entry = pack.entry(header, done)
-    const read = createReadStream(body.file)
-    read.on('error', (err) => {
-      entry.destroy(err)
-      reject(err)
-    })
-    read.pipe(entry)
+function addData(pack: tarStream.Pack, name: string, data: Buffer): Promise<void> {
+  return new Promise((resolveEntry, rejectEntry) => {
+    pack.entry({ name, mode: 0o644, mtime: new Date() }, data, (err) => (err ? rejectEntry(err) : resolveEntry()))
   })
+}
+
+type Sink = ReturnType<tarStream.Pack['entry']>
+
+function drained(entry: Sink): Promise<void> {
+  return new Promise((resolveDrain, rejectDrain) => {
+    const cleanup = () => {
+      entry.off('drain', onDrain)
+      entry.off('close', onClose)
+      entry.off('error', onError)
+    }
+    const onDrain = () => (cleanup(), resolveDrain())
+    const onClose = () => (cleanup(), rejectDrain(new Error('The archive was closed while writing')))
+    const onError = (err: Error) => (cleanup(), rejectDrain(err))
+    entry.on('drain', onDrain)
+    entry.on('close', onClose)
+    entry.on('error', onError)
+  })
+}
+
+/**
+ * Adds one file, writing exactly the size the tar header promises: chat transcripts keep
+ * growing while a backup runs, and tar refuses an entry whose size changes. Bytes appended
+ * after the header are left out; a file that shrank is padded with zeros.
+ * Returns the bytes written, or null when the file can no longer be read (it is skipped).
+ */
+async function addFile(pack: tarStream.Pack, name: string, abs: string): Promise<number | null> {
+  let handle: FileHandle
+  try {
+    handle = await open(abs, 'r')
+  } catch {
+    return null
+  }
+  try {
+    const st = await handle.stat()
+    if (!st.isFile()) return null
+    const size = st.size
+    await new Promise<void>((resolveEntry, rejectEntry) => {
+      let settled = false
+      const settle = (err?: Error | null) => {
+        if (settled) return
+        settled = true
+        if (err) rejectEntry(err)
+        else resolveEntry()
+      }
+      const entry = pack.entry({ name, size, mode: st.mode & 0o777, mtime: st.mtime }, settle)
+      void (async () => {
+        let offset = 0
+        while (offset < size) {
+          const want = Math.min(CHUNK, size - offset)
+          const chunk = Buffer.alloc(want) // zero-filled, so a file that shrank pads itself
+          let filled = 0
+          while (filled < want) {
+            const { bytesRead } = await handle.read(chunk, filled, want - filled, offset + filled)
+            if (bytesRead === 0) break
+            filled += bytesRead
+          }
+          offset += want
+          if (!entry.write(chunk)) await drained(entry)
+        }
+        entry.end(null) // streamx: no final chunk
+      })().catch((err: Error) => {
+        entry.destroy(err)
+        settle(err)
+      })
+    })
+    return size
+  } finally {
+    await handle.close().catch(() => undefined)
+  }
 }
 
 export async function createBackup(ctx: BackupContext, opts: CreateOptions): Promise<BackupInfo> {
@@ -279,20 +352,11 @@ export async function createBackup(ctx: BackupContext, opts: CreateOptions): Pro
   let written = 0
   let lastReport = 0
   try {
-    await addEntry(pack, { name: 'duet-backup.json', mode: 0o644, mtime: new Date() }, { data: Buffer.from(JSON.stringify(manifest, null, 2)) })
+    await addData(pack, 'duet-backup.json', Buffer.from(JSON.stringify(manifest, null, 2)))
     for (const f of files) {
-      let st
-      try {
-        st = lstatSync(f.abs)
-      } catch {
-        continue // vanished since we scanned
-      }
-      if (st.isSymbolicLink()) {
-        await addEntry(pack, { name: f.name, type: 'symlink', linkname: readlinkSync(f.abs), mode: 0o755, mtime: st.mtime })
-      } else if (st.isFile()) {
-        await addEntry(pack, { name: f.name, size: st.size, mode: st.mode & 0o777, mtime: st.mtime }, { file: f.abs })
-        written += st.size
-      }
+      const size = await addFile(pack, f.name, f.abs)
+      if (size === null) continue // vanished or became unreadable since the scan
+      written += size
       const now = Date.now()
       if (now - lastReport > 150) {
         lastReport = now
@@ -338,12 +402,55 @@ export function listBackups(dir: string): BackupInfo[] {
   return out.sort((a, b) => b.createdAt - a.createdAt)
 }
 
+/** realpath that also works for paths that don't exist yet (resolved through their nearest existing parent). */
+function realish(path: string): string {
+  let existing = resolve(path)
+  const rest: string[] = []
+  while (!existsSync(existing)) {
+    const up = dirname(existing)
+    if (up === existing) break
+    rest.unshift(basename(existing))
+    existing = up
+  }
+  try {
+    return join(realpathSync(existing), ...rest)
+  } catch {
+    return resolve(path)
+  }
+}
+
+/**
+ * Where a restored file may be written: never through a folder or link that leads outside its
+ * data folder. A file that is itself a link inside the folder is updated at its real location,
+ * so the link survives.
+ */
+export function restoreTarget(target: string, rootKey: string, ctx: BackupContext): string | null {
+  const root = rootKey === 'claude-json' ? dirname(ctx.claudeJson) : roots(ctx)[rootKey as RootKey]
+  if (!root) return null
+  const realRoot = realish(root)
+  if (!within(realish(dirname(target)), realRoot)) return null
+  let st
+  try {
+    st = lstatSync(target)
+  } catch {
+    return target // new file
+  }
+  if (st.isDirectory()) return null
+  if (!st.isSymbolicLink()) return target
+  try {
+    const real = realpathSync(target)
+    return within(real, realRoot) && statSync(real).isFile() ? real : null
+  } catch {
+    return null // dangling link: leave it alone
+  }
+}
+
 export async function restoreBackup(
   ctx: BackupContext,
   file: string,
   sets: string[],
-  opts: { safetyDir: string; onProgress?: (done: number, total: number) => void }
-): Promise<{ restored: number; safetyBackup: string }> {
+  opts: { safetyDir: string; onProgress?: (done: number, total: number) => void; log?: (...args: unknown[]) => void }
+): Promise<{ restored: number; skipped: number; safetyBackup: string }> {
   if (!existsSync(file)) throw new Error('Backup file not found')
   const wanted = new Set(sets)
   // 1. Snapshot what is about to be overwritten so a restore can always be undone.
@@ -352,6 +459,7 @@ export async function restoreBackup(
   if (present.length) safetyBackup = (await createBackup(ctx, { sets: present, dir: opts.safetyDir, suffix: 'before-restore' })).file
   // 2. Stream through the archive and write the chosen sets.
   let restored = 0
+  let skipped = 0
   let processed = 0
   const total = statSync(file).size
   const extract = tarStream.extract()
@@ -362,57 +470,43 @@ export async function restoreBackup(
     }
     processed += header.size ?? 0
     opts.onProgress?.(Math.min(processed, total), total)
-    const target = header.name === 'duet-backup.json' ? null : restorePath(header.name, ctx)
-    const set = target ? setForPath(target, ctx) : null
-    if (!target || !set || !wanted.has(set)) {
+    const skip = (counted: boolean) => {
+      if (counted) skipped++
       stream.on('end', () => finish())
       stream.resume()
-      return
     }
+    const target = header.name === 'duet-backup.json' ? null : restorePath(header.name, ctx)
+    const set = target ? setForPath(target, ctx) : null
+    if (!target || !set || !wanted.has(set)) return skip(false)
+    // Archives never create links (older Duet backups stored some): a link written by an
+    // archive could point the next entry anywhere on disk.
+    if (header.type !== 'file' && header.type !== undefined) return skip(header.type !== 'directory')
+    const dest = restoreTarget(target, header.name.slice(0, header.name.indexOf('/')), ctx)
+    if (!dest) {
+      opts.log?.('[backup] skipped (outside its data folder)', header.name)
+      return skip(true)
+    }
+    const tmp = `${dest}.duet-restore`
     try {
-      mkdirSync(dirname(target), { recursive: true })
-      if (header.type === 'symlink' && header.linkname) {
-        stream.resume()
-        stream.on('end', () => {
-          try {
-            // Only recreate links that stay inside their data folder.
-            const linkTarget = isAbsolute(header.linkname!) ? header.linkname! : resolve(dirname(target), header.linkname!)
-            const root = Object.values(roots(ctx)).find((r) => within(target, r))
-            if (root && within(linkTarget, root)) {
-              rmSync(target, { force: true, recursive: true })
-              symlinkSync(header.linkname!, target)
-              restored++
-            }
-            finish()
-          } catch (e) {
-            finish(e)
-          }
-        })
-        return
-      }
-      if (header.type !== 'file' && header.type !== undefined) {
-        stream.on('end', () => finish())
-        stream.resume()
-        return
-      }
-      const tmp = `${target}.duet-restore`
-      const out = createWriteStream(tmp, { mode: header.mode ? header.mode & 0o777 : 0o644 })
-      pipeline(stream, out)
-        .then(() => {
-          renameSync(tmp, target)
-          restored++
-          finish()
-        })
-        .catch((e) => {
-          rmSync(tmp, { force: true })
-          finish(e)
-        })
+      mkdirSync(dirname(dest), { recursive: true })
     } catch (e) {
-      finish(e)
+      opts.log?.('[backup] skipped', header.name, (e as Error).message)
+      return skip(true)
     }
+    const out = createWriteStream(tmp, { mode: header.mode ? header.mode & 0o777 : 0o644 })
+    pipeline(stream, out)
+      .then(() => {
+        renameSync(tmp, dest)
+        restored++
+        finish()
+      })
+      .catch((e) => {
+        rmSync(tmp, { force: true })
+        finish(e)
+      })
   })
   await pipeline(createReadStream(file), createGunzip(), extract)
-  return { restored, safetyBackup }
+  return { restored, skipped, safetyBackup }
 }
 
 export function defaultContext(duetDir: string, appVersion: string): BackupContext {

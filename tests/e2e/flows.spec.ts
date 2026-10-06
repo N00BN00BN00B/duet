@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { launchDuet, type Launched } from './launch'
 
@@ -213,6 +215,81 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await page.getByTestId('toggle-browser').click()
   })
 
+  test('browser pages get no camera, location or notification access', async () => {
+    const { page, app } = ctx
+    const server = createServer((_req, res) => res.end('<h1>permissions</h1>'))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    try {
+      const { port } = server.address() as AddressInfo
+      await page.getByTestId('toggle-browser').click()
+      await page.getByTestId('browser-url').fill(`http://127.0.0.1:${port}/`)
+      await page.getByTestId('browser-url').press('Enter')
+      await expect
+        .poll(() => app.evaluate(({ webContents }) => webContents.getAllWebContents().find((w) => w.getType() === 'webview')?.getURL() ?? ''))
+        .toContain(`127.0.0.1:${port}`)
+      const answers = await app.evaluate(async ({ webContents }) => {
+        const guest = webContents.getAllWebContents().find((w) => w.getType() === 'webview')!
+        return guest.executeJavaScript(
+          `Promise.all([
+            Notification.requestPermission(),
+            navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state),
+            navigator.mediaDevices.getUserMedia({ video: true }).then(() => 'granted', (e) => e.name)
+          ])`
+        )
+      })
+      expect(answers).toEqual(['denied', 'denied', 'NotAllowedError'])
+      await page.getByTestId('toggle-browser').click()
+    } finally {
+      server.close()
+    }
+  })
+
+  test('pictures from the web in replies load only when clicked', async () => {
+    const { page } = ctx
+    await send(page, 'draw the architecture diagram')
+    await waitIdle(page)
+    const placeholder = page.getByTestId('remote-image').last()
+    await expect(placeholder).toContainText('Load image from 127.0.0.1:9')
+    await expect(page.locator('[data-testid="timeline"] img[src^="https://127.0.0.1:9"]')).toHaveCount(0)
+    await placeholder.click()
+    await expect(page.locator('[data-testid="timeline"] img[src^="https://127.0.0.1:9"]')).toHaveCount(1)
+  })
+
+  test('hiding the terminal keeps its shell running', async () => {
+    const { page } = ctx
+    await page.getByTestId('toggle-terminal').click()
+    const rows = page.locator('[data-testid="terminal-drawer"] .xterm-rows')
+    // Same shell as the panels test: its earlier output is still there.
+    await expect(rows).toContainText('duet-42-ok')
+    await page.locator('[data-testid="terminal-drawer"] .xterm').click()
+    await page.keyboard.type('export DUET_MARK=7')
+    await page.keyboard.press('Enter')
+    await page.getByTestId('toggle-terminal').click()
+    await expect(page.getByTestId('terminal-drawer')).toBeHidden()
+    await page.getByTestId('toggle-terminal').click()
+    await page.locator('[data-testid="terminal-drawer"] .xterm').click()
+    await page.keyboard.type('echo mark-$DUET_MARK-$((1+1))')
+    await page.keyboard.press('Enter')
+    await expect(rows).toContainText('mark-7-2', { timeout: 15_000 })
+    await page.getByTestId('toggle-terminal').click()
+  })
+
+  test('a queued follow-up comes back to the message box when the turn fails', async () => {
+    const { page } = ctx
+    await send(page, 'please crash now')
+    await expect(page.getByTestId('stop-button')).toBeVisible({ timeout: 10_000 })
+    const input = page.getByTestId('composer-input')
+    await input.fill('a follow-up for after the crash')
+    await page.getByTestId('queue-button').click()
+    await expect(page.getByTestId('queued-message')).toBeVisible()
+    await expect(page.getByTestId('timeline')).toContainText('crashed on purpose', { timeout: 20_000 })
+    await expect(page.getByTestId('queued-message')).toBeHidden()
+    await expect(input).toHaveValue('a follow-up for after the crash')
+    await expect(page.getByText('your queued message wasn’t sent')).toBeVisible()
+    await expect(page.getByTestId('timeline')).not.toContainText('You said: “a follow-up for after the crash”')
+    await input.fill('')
+  })
+
   test('thread menu: rename, pin, fork, archive and unarchive', async () => {
     const { page } = ctx
     const row = page.locator('[data-testid="thread-row"]').first()
@@ -232,6 +309,11 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await page.getByRole('menuitem', { name: 'Fork thread' }).click()
     await expect(page.getByTestId('thread-title')).toHaveText('Renamed thread (fork)')
     await expect(page.getByTestId('timeline')).toContainText('Hello from the automated suite')
+    // Each thread gets its own composer, so nothing in flight in one shows up in another.
+    await page.getByTestId('composer-input').evaluate((el) => el.setAttribute('data-owner', 'fork'))
+    await row.click()
+    await expect(page.getByTestId('thread-title')).toHaveText('Renamed thread')
+    await expect(page.getByTestId('composer-input')).not.toHaveAttribute('data-owner', 'fork')
     // Archive the fork, then bring it back.
     const fork = page.locator('[data-testid="thread-row"]').filter({ hasText: '(fork)' })
     await fork.click({ button: 'right' })

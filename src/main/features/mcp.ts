@@ -222,14 +222,80 @@ export interface McpWriteDeps {
   claude: (args: string[], cwd?: string) => Promise<{ stdout: string; stderr: string; code: number }>
   /** Sends a request to the Codex app-server. */
   codex: (method: string, params: Json) => Promise<Json>
+  /** Reads ~/.claude.json (defaults to the real one). */
+  readClaude?: () => Json
+  /** Reads ~/.codex/config.toml (defaults to the real one). */
+  readCodex?: () => Json
 }
 
-export async function writeClaudeServer(deps: McpWriteDeps, cfg: McpServerConfig, scope: 'user' | 'local' | 'project' = 'user', cwd?: string, replace = true): Promise<void> {
+export type ClaudeScope = 'user' | 'local' | 'project'
+
+export interface ClaudeWriteTarget {
+  scope?: ClaudeScope
+  /** Project folder for local and project scoped servers. */
+  project?: string
+  /** The server's current name when it is being renamed. */
+  previousName?: string
+}
+
+/** Keys Duet edits; everything else in a server's entry (oauth, headersHelper, timeouts…) is kept. */
+const CLAUDE_MANAGED = ['type', 'command', 'args', 'env', 'url', 'headers']
+const CODEX_MANAGED = ['command', 'args', 'env', 'url', 'http_headers', 'bearer_token_env_var']
+
+function plainObject(value: unknown): Json | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+/** The raw entry Claude has for a server in one scope, or null. */
+export function readClaudeServer(deps: McpWriteDeps, name: string, scope: ClaudeScope, project?: string): Json | null {
+  if (scope === 'project') {
+    if (!project) return null
+    try {
+      return plainObject(JSON.parse(readFileSync(join(project, '.mcp.json'), 'utf8'))?.mcpServers?.[name])
+    } catch {
+      return null
+    }
+  }
+  const data = (deps.readClaude ?? readClaudeJson)()
+  return plainObject(scope === 'local' ? data?.projects?.[project ?? '']?.mcpServers?.[name] : data?.mcpServers?.[name])
+}
+
+/** New Claude entry: Duet's fields on top of whatever else the existing entry had. */
+export function mergeClaudeEntry(existing: Json | null, cfg: McpServerConfig): Json {
+  const base: Json = { ...(plainObject(existing) ?? {}) }
+  for (const key of CLAUDE_MANAGED) delete base[key]
+  return { ...base, ...configToClaude(cfg) }
+}
+
+export async function writeClaudeServer(deps: McpWriteDeps, cfg: McpServerConfig, target: ClaudeWriteTarget = {}): Promise<void> {
   const err = validateServer(cfg)
   if (err) throw new Error(err)
-  if (replace) await deps.claude(['mcp', 'remove', cfg.name, '--scope', scope], cwd).catch(() => undefined)
-  const res = await deps.claude(['mcp', 'add-json', cfg.name, JSON.stringify(configToClaude(cfg)), '--scope', scope], cwd)
-  if (res.code !== 0) throw new Error((res.stderr || res.stdout).trim() || `claude mcp add-json failed (${res.code})`)
+  const scope = target.scope ?? 'user'
+  const cwd = scope === 'user' ? undefined : target.project
+  if (scope !== 'user' && !cwd) throw new Error(`A project folder is needed to change a ${scope} server.`)
+  const oldName = target.previousName ?? cfg.name
+  const existing = readClaudeServer(deps, oldName, scope, cwd)
+  const entry = mergeClaudeEntry(existing, cfg)
+  const run = async (args: string[], what: string) => {
+    const res = await deps.claude([...args, '--scope', scope], cwd)
+    if (res.code !== 0) throw new Error((res.stderr || res.stdout).trim() || `claude mcp ${what} failed (${res.code})`)
+  }
+  const add = (name: string, value: Json) => run(['mcp', 'add-json', name, JSON.stringify(value)], 'add-json')
+  if (oldName !== cfg.name) {
+    // Rename: add under the new name first, so a failure leaves the old entry untouched.
+    await add(cfg.name, entry)
+    if (existing) await run(['mcp', 'remove', oldName], 'remove')
+    return
+  }
+  if (!existing) return add(cfg.name, entry)
+  // Claude has no "update": replace the entry, and put the old one back if the new one is refused.
+  await run(['mcp', 'remove', cfg.name], 'remove')
+  try {
+    await add(cfg.name, entry)
+  } catch (error) {
+    await add(cfg.name, existing).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function removeClaudeServer(deps: McpWriteDeps, name: string, scope: string, cwd?: string): Promise<void> {
@@ -237,10 +303,21 @@ export async function removeClaudeServer(deps: McpWriteDeps, name: string, scope
   if (res.code !== 0) throw new Error((res.stderr || res.stdout).trim() || `claude mcp remove failed (${res.code})`)
 }
 
-export async function writeCodexServer(deps: McpWriteDeps, cfg: McpServerConfig): Promise<void> {
+export async function writeCodexServer(deps: McpWriteDeps, cfg: McpServerConfig, previousName?: string): Promise<void> {
   const err = validateServer(cfg)
   if (err) throw new Error(err)
-  const table = configToCodex(cfg)
+  const renamed = !!previousName && previousName !== cfg.name
+  if (renamed && !MCP_NAME.test(previousName)) throw new Error(`Cannot rename "${previousName}" in Codex: unsupported name`)
+  let table = configToCodex(cfg)
+  if (renamed) {
+    // Carry the old entry's other settings (per-tool approvals, timeouts…) over to the new name.
+    const old = plainObject((deps.readCodex ?? readCodexConfig)()?.mcp_servers?.[previousName])
+    if (old) {
+      const base: Json = { ...old }
+      for (const key of CODEX_MANAGED) delete base[key]
+      table = { ...base, ...table }
+    }
+  }
   const key = `mcp_servers.${cfg.name}`
   const edits: Json[] = [{ keyPath: key, value: table, mergeStrategy: 'upsert' }]
   // Fields Duet manages are replaced so removed args/env/headers really disappear,
@@ -256,7 +333,10 @@ export async function writeCodexServer(deps: McpWriteDeps, cfg: McpServerConfig)
     if (!table.http_headers) edits.push({ keyPath: `${key}.http_headers`, value: null, mergeStrategy: 'replace' })
     if (!table.bearer_token_env_var) edits.push({ keyPath: `${key}.bearer_token_env_var`, value: null, mergeStrategy: 'replace' })
   }
-  if (cfg.enabled !== false) edits.push({ keyPath: `${key}.enabled`, value: null, mergeStrategy: 'replace' })
+  // Only an explicit choice changes whether the server is on: an edit never re-enables it.
+  if (cfg.enabled === true) edits.push({ keyPath: `${key}.enabled`, value: null, mergeStrategy: 'replace' })
+  // A rename removes the old entry in the same atomic write.
+  if (renamed) edits.push({ keyPath: `mcp_servers.${previousName}`, value: null, mergeStrategy: 'replace' })
   await deps.codex('config/batchWrite', { edits, reloadUserConfig: true })
   await deps.codex('config/mcpServer/reload', {}).catch(() => undefined)
 }

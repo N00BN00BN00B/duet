@@ -21,6 +21,8 @@ export interface CodexDeps {
   env: () => NodeJS.ProcessEnv
   appVersion: string
   log?: (...args: unknown[]) => void
+  /** How long Codex gets to confirm a Stop before the turn is ended locally. */
+  interruptGraceMs?: number
 }
 
 const SERVER_IDLE_MS = 30 * 60 * 1000
@@ -50,6 +52,10 @@ interface ThreadState {
   active: boolean
   interrupted: boolean
   interruptTimer?: NodeJS.Timeout
+  /** Turn the last `turn/interrupt` was sent for. */
+  interruptSentFor?: string
+  /** Incremented for every turn, so timers armed for an old turn can never touch a newer one. */
+  turnSeq: number
   startedAt: number
 }
 
@@ -66,6 +72,8 @@ export class CodexAdapter implements ProviderAdapter {
   private starting: Promise<CodexRpc> | null = null
   private threads = new Map<string, ThreadState>()
   private byCodex = new Map<string, string>()
+  /** Codex thread ids of deleted Duet threads: their late events are dropped, never reassigned. */
+  private released = new Set<string>()
   private approvals = new Map<string, PendingRequest>()
   private statusCache: ProviderStatus | null = null
   private statusPromise: Promise<ProviderStatus> | null = null
@@ -155,7 +163,7 @@ export class CodexAdapter implements ProviderAdapter {
     let st = this.threads.get(req.threadId)
     if (!st) {
       const mapper = new CodexThreadMapper({ cwd: req.cwd, home: homedir(), now: Date.now }, emit)
-      st = { duetId: req.threadId, loaded: false, cwd: req.cwd, emit, mapper, active: false, interrupted: false, startedAt: 0 }
+      st = { duetId: req.threadId, loaded: false, cwd: req.cwd, emit, mapper, active: false, interrupted: false, turnSeq: 0, startedAt: 0 }
       this.threads.set(req.threadId, st)
     }
     st.emit = emit
@@ -198,7 +206,7 @@ export class CodexAdapter implements ProviderAdapter {
         st.mapper.model = res.model ?? req.model
       }
       st.loaded = true
-      this.byCodex.set(st.codexId!, req.threadId)
+      this.bind(st.codexId!, req.threadId)
       emit({ type: 'native-id', nativeId: st.codexId! })
     }
     const pathLines: string[] = []
@@ -212,8 +220,14 @@ export class CodexAdapter implements ProviderAdapter {
     if (pathLines.length) text = `${text}\n\n${pathLines.join('\n')}`
     input.unshift({ type: 'text', text, text_elements: [] })
     if (req.model) st.mapper.model = req.model
+    if (st.interruptTimer) {
+      clearTimeout(st.interruptTimer)
+      st.interruptTimer = undefined
+    }
+    st.turnSeq++
     st.active = true
     st.interrupted = false
+    st.interruptSentFor = undefined
     st.turnId = undefined
     st.startedAt = Date.now()
     try {
@@ -228,6 +242,8 @@ export class CodexAdapter implements ProviderAdapter {
         summary: 'auto'
       })
       if (res?.turn?.id) st.turnId = res.turn.id
+      // Stop pressed before Codex told us the turn id.
+      if (st.interrupted && st.active) void this.sendInterrupt(st)
     } catch (error) {
       st.active = false
       throw new Error(friendlyCodexError((error as Error).message, rpc.stderr.value))
@@ -283,9 +299,15 @@ export class CodexAdapter implements ProviderAdapter {
     }
     st.cwd = req.cwd
     st.loaded = true
-    this.byCodex.set(st.codexId!, req.threadId)
+    this.bind(st.codexId!, req.threadId)
     emit({ type: 'native-id', nativeId: st.codexId! })
     return st.codexId
+  }
+
+  private bind(codexId: string, duetId: string): void {
+    // A thread can come back (e.g. imported again from History after being deleted).
+    this.released.delete(codexId)
+    this.byCodex.set(codexId, duetId)
   }
 
   async interrupt(threadId: string): Promise<void> {
@@ -298,18 +320,28 @@ export class CodexAdapter implements ProviderAdapter {
       this.approvals.delete(itemId)
       st.emit({ type: 'approval-status', itemId, status: 'expired' })
     }
+    // Pressing Stop twice re-arms one timer instead of leaving an older one behind that could
+    // end the next turn.
+    const turn = st.turnSeq
+    if (st.interruptTimer) clearTimeout(st.interruptTimer)
     st.interruptTimer = setTimeout(() => {
-      if (st.active) {
+      st.interruptTimer = undefined
+      if (st.active && st.turnSeq === turn) {
         st.active = false
         st.emit({ type: 'turn-end', status: 'interrupted' })
       }
-    }, 10_000)
-    if (this.rpc && st.codexId && st.turnId) {
-      try {
-        await this.rpc.request('turn/interrupt', { threadId: st.codexId, turnId: st.turnId }, 8000)
-      } catch (error) {
-        this.deps.log?.('[codex] interrupt failed', (error as Error).message)
-      }
+    }, this.deps.interruptGraceMs ?? 10_000)
+    // Without a turn id yet, the interrupt goes out as soon as Codex reports one.
+    await this.sendInterrupt(st)
+  }
+
+  private async sendInterrupt(st: ThreadState): Promise<void> {
+    if (!this.rpc || !st.codexId || !st.turnId || st.interruptSentFor === st.turnId) return
+    st.interruptSentFor = st.turnId
+    try {
+      await this.rpc.request('turn/interrupt', { threadId: st.codexId, turnId: st.turnId }, 8000)
+    } catch (error) {
+      this.deps.log?.('[codex] interrupt failed', (error as Error).message)
     }
   }
 
@@ -370,16 +402,28 @@ export class CodexAdapter implements ProviderAdapter {
   // ---------- incoming traffic ----------
 
   private resolveThread(codexThreadId: string | undefined): ThreadState | undefined {
-    if (!codexThreadId) return undefined
+    if (!codexThreadId || this.released.has(codexThreadId)) return undefined
     const duetId = this.byCodex.get(codexThreadId)
     if (duetId) return this.threads.get(duetId)
-    // Sub-agent threads report under their own id; attribute them to the only active thread.
+    // A sub-agent we didn't see start: it can only belong to a thread that is working right now.
+    // Not remembered, so a stray id can never stick to a thread that happens to be active.
     const active = [...this.threads.values()].filter((t) => t.active)
-    if (active.length === 1) {
-      this.byCodex.set(codexThreadId, active[0].duetId)
-      return active[0]
+    return active.length === 1 ? active[0] : undefined
+  }
+
+  /** Remembers which Duet thread a sub-agent belongs to (`thread/started` names its parent). */
+  private adoptSubagent(thread: Json): void {
+    const id: unknown = thread?.id
+    if (typeof id !== 'string' || this.byCodex.has(id) || this.released.has(id)) return
+    const source = thread?.source?.subAgent ?? thread?.source?.subagent
+    const parent: unknown = thread?.parentThreadId ?? source?.thread_spawn?.parent_thread_id
+    if (typeof parent !== 'string') return
+    if (this.released.has(parent)) {
+      this.released.add(id)
+      return
     }
-    return undefined
+    const duetId = this.byCodex.get(parent)
+    if (duetId) this.byCodex.set(id, duetId)
   }
 
   private isPrimary(st: ThreadState, codexThreadId: string): boolean {
@@ -389,8 +433,13 @@ export class CodexAdapter implements ProviderAdapter {
   private onNotification(method: string, params: Json): void {
     if (method === 'account/rateLimits/updated') {
       const limits = codexRateWindows(params?.rateLimits)
-      if (limits.length) this.setLimits(limits)
-      for (const st of this.threads.values()) if (st.active) st.emit({ type: 'limits', limits })
+      if (!limits.length) return
+      this.setLimits(limits)
+      for (const st of this.threads.values()) if (st.active) st.emit({ type: 'limits', limits: this.limits })
+      return
+    }
+    if (method === 'thread/started') {
+      this.adoptSubagent(params?.thread)
       return
     }
     const st = this.resolveThread(params?.threadId)
@@ -399,7 +448,10 @@ export class CodexAdapter implements ProviderAdapter {
     const m = st.mapper
     switch (method) {
       case 'turn/started':
-        if (primary && params.turn?.id) st.turnId = params.turn.id
+        if (primary && params.turn?.id) {
+          st.turnId = params.turn.id
+          if (st.interrupted && st.active) void this.sendInterrupt(st)
+        }
         break
       case 'item/started':
         m.itemStarted(params.item)
@@ -447,7 +499,10 @@ export class CodexAdapter implements ProviderAdapter {
         if (!primary) break
         const turn = params.turn ?? {}
         if (turn.id && st.turnId && turn.id !== st.turnId) break
-        if (st.interruptTimer) clearTimeout(st.interruptTimer)
+        if (st.interruptTimer) {
+          clearTimeout(st.interruptTimer)
+          st.interruptTimer = undefined
+        }
         m.finishTurn(turn.id ?? st.turnId ?? '')
         if (!st.active) break
         st.active = false
@@ -554,9 +609,12 @@ export class CodexAdapter implements ProviderAdapter {
 
   // ---------- status ----------
 
+  /** Updates often carry one window only; merge by label so the others don't flicker away. */
   private setLimits(limits: RateWindow[]): void {
-    this.limits = limits
-    if (this.statusCache) this.statusCache = { ...this.statusCache, limits }
+    const merged = new Map(this.limits.map((l) => [l.label, l]))
+    for (const l of limits) merged.set(l.label, l)
+    this.limits = [...merged.values()]
+    if (this.statusCache) this.statusCache = { ...this.statusCache, limits: this.limits }
   }
 
   getLimits(): RateWindow[] {
@@ -661,9 +719,20 @@ export class CodexAdapter implements ProviderAdapter {
 
   release(threadId: string): void {
     const st = this.threads.get(threadId)
+    if (st?.interruptTimer) clearTimeout(st.interruptTimer)
+    for (const [codexId, duetId] of [...this.byCodex]) {
+      if (duetId !== threadId) continue
+      this.byCodex.delete(codexId)
+      this.released.add(codexId)
+    }
+    for (const [itemId, pending] of [...this.approvals]) {
+      if (pending.duetId !== threadId) continue
+      this.answer(pending, { kind: 'deny' }, true)
+      this.approvals.delete(itemId)
+    }
     if (!st) return
     if (st.codexId) {
-      this.byCodex.delete(st.codexId)
+      this.released.add(st.codexId)
       if (this.rpc && st.loaded) this.rpc.request('thread/unsubscribe', { threadId: st.codexId }, 5000).catch(() => undefined)
     }
     this.threads.delete(threadId)

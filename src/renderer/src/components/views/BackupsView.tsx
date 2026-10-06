@@ -65,7 +65,10 @@ export function BackupsView() {
     setBusyRestore(true)
     try {
       const res = await duet.backup.restore(restoring.file, restoreSets)
-      toast(`Restored ${res.restored} files. A safety backup of what was replaced is in your backup folder.`, 'success')
+      toast(
+        `Restored ${res.restored} file${res.restored === 1 ? '' : 's'}${res.skipped ? ` (${res.skipped} skipped — links or folders that lead outside Claude, Codex or Duet’s data)` : ''}. A safety backup of what was replaced is in your backup folder.`,
+        'success'
+      )
       if (restoreSets.includes('duet')) toast('Duet will restart to load the restored threads…', 'info')
       setRestoring(null)
       await load()

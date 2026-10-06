@@ -4,6 +4,7 @@ import { unifiedDiff } from '@shared/diff'
 import type { Emit, ProviderAdapter, TurnRequest } from '../types'
 
 interface Run {
+  nativeId: string
   emit: Emit
   timers: NodeJS.Timeout[]
   wakers: (() => void)[]
@@ -18,6 +19,8 @@ interface Run {
 export class FakeAdapter implements ProviderAdapter {
   private runs = new Map<string, Run>()
   private counter = 0
+  /** Running cost per session: Claude reports totals, not per-turn amounts. */
+  private totals = new Map<string, number>()
 
   constructor(
     readonly id: ProviderId,
@@ -63,9 +66,10 @@ export class FakeAdapter implements ProviderAdapter {
 
   async startTurn(req: TurnRequest, emit: Emit): Promise<void> {
     if (this.runs.has(req.threadId)) throw new Error(`${PROVIDER_LABEL[this.id]} is still working on the previous message.`)
-    const run: Run = { emit, timers: [], wakers: [], interrupted: false, approvals: new Map() }
+    const nativeId = req.nativeId ?? `${this.id}-demo-${req.threadId.slice(0, 8)}`
+    const run: Run = { nativeId, emit, timers: [], wakers: [], interrupted: false, approvals: new Map() }
     this.runs.set(req.threadId, run)
-    emit({ type: 'native-id', nativeId: req.nativeId ?? `${this.id}-demo-${req.threadId.slice(0, 8)}` })
+    emit({ type: 'native-id', nativeId })
     void this.script(req, run).finally(() => {
       for (const t of run.timers) clearTimeout(t)
       this.runs.delete(req.threadId)
@@ -91,6 +95,8 @@ export class FakeAdapter implements ProviderAdapter {
     lines.push(`**${PROVIDER_LABEL[this.id]}** here (${req.model ?? 'default model'}). You said: “${userText.slice(0, 200)}”.`)
     if (req.attachments.length) lines.push(`I received ${req.attachments.length} attachment${req.attachments.length === 1 ? '' : 's'}: ${req.attachments.map((a) => a.name).join(', ')}.`)
     lines.push('Here is a code sample:\n\n```ts\nexport function greet(name: string): string {\n  return `Hello, ${name}!`\n}\n```')
+    // A picture from the web (port 9 refuses connections, so nothing is ever fetched for real).
+    if (/\bdiagram\b/i.test(userText)) lines.push('![Architecture diagram](https://127.0.0.1:9/diagram.png)')
     const answer = lines.join('\n\n')
     const answerId = `${turn}-answer`
     const words = answer.split(/(?<=\s)/)
@@ -116,7 +122,7 @@ export class FakeAdapter implements ProviderAdapter {
         if (decision.kind === 'deny') {
           emit({ type: 'item', item: { ...tool, status: 'declined' } })
           emit({ type: 'item', item: { kind: 'assistant', id: `${turn}-declined`, ts: Date.now(), provider: this.id, text: 'Okay, I won’t run the tests.' } })
-          emit({ type: 'turn-end', status: 'completed', durationMs: Date.now() - started, costUsd: 0.001, model: req.model })
+          emit({ type: 'turn-end', status: 'completed', durationMs: Date.now() - started, costUsd: this.charge(run, 0.001), model: req.model })
           return
         }
       }
@@ -156,10 +162,25 @@ export class FakeAdapter implements ProviderAdapter {
       })
     }
 
+    if (/\bcrash\b/i.test(userText)) {
+      await this.sleep(run, 4500)
+      if (run.interrupted) return
+      emit({ type: 'turn-end', status: 'failed', error: 'The demo agent crashed on purpose.', durationMs: Date.now() - started, model: req.model })
+      return
+    }
+
     await this.sleep(run, 60)
     if (run.interrupted) return
     emit({ type: 'context', usage: { usedTokens: 18_000 + this.counter * 1200, windowTokens: 200_000 } })
-    emit({ type: 'turn-end', status: 'completed', durationMs: Date.now() - started, costUsd: 0.0123, inputTokens: 1800, outputTokens: 240, model: req.model })
+    emit({ type: 'turn-end', status: 'completed', durationMs: Date.now() - started, costUsd: this.charge(run, 0.0123), inputTokens: 1800, outputTokens: 240, model: req.model })
+  }
+
+  /** Mirrors the real agents: Claude reports the session's running total, Codex reports nothing. */
+  private charge(run: Run, amount: number): number | undefined {
+    if (this.id !== 'claude') return undefined
+    const total = (this.totals.get(run.nativeId) ?? 0) + amount
+    this.totals.set(run.nativeId, total)
+    return total
   }
 
   async interrupt(threadId: string): Promise<void> {

@@ -1,11 +1,11 @@
-import { app, BrowserWindow, dialog, Menu, nativeTheme, net, Notification, protocol, shell, webContents, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeTheme, net, Notification, protocol, session, shell, webContents, type MenuItemConstructorOptions } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { EVENT_CHANNEL, FILE_PROTOCOL } from '@shared/api'
-import type { AccessMode, DuetEvent, McpServerConfig, ProviderId, Settings, SyncAction, ThemePref, ThreadMeta } from '@shared/types'
+import type { AccessMode, DuetEvent, McpEditSource, McpServerConfig, ProviderId, Settings, SyncAction, ThemePref, ThreadMeta } from '@shared/types'
 import { PROVIDERS } from '@shared/types'
 import { truncate } from '@shared/paths'
 import { findBinary, getEnv, loadShellEnv, runCommand } from './env'
@@ -244,6 +244,27 @@ async function runAutoBackupIfDue(): Promise<void> {
   }
 }
 
+function relaunchSoon(delayMs: number): void {
+  setTimeout(() => {
+    void (async () => {
+      quitting = true
+      terminals?.killAll()
+      await Promise.all(Object.values(adapters).map((a) => a.shutdown().catch(() => undefined)))
+      app.relaunch()
+      app.exit(0)
+    })()
+  }, delayMs)
+}
+
+/** Pages in the built-in browser get no camera, microphone, location, notifications or devices. */
+function lockDownBrowserSession(): void {
+  const allowed = new Set(['fullscreen', 'clipboard-sanitized-write'])
+  const browser = session.fromPartition('persist:duet-browser')
+  browser.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)))
+  browser.setPermissionCheckHandler((_wc, permission) => allowed.has(permission))
+  browser.setDevicePermissionHandler(() => false)
+}
+
 // ---------- IPC handlers ----------
 
 const THEMES: ThemePref[] = ['system', 'dark', 'light']
@@ -360,18 +381,19 @@ function handlers(): HandlerMap {
         }
         return mergeStatus(entries, claudeStatus, codexStatus)
       },
-      save: async (config: McpServerConfig, targets: ProviderId[], previousName?: string) => {
+      save: async (config: McpServerConfig, targets: ProviderId[], source?: McpEditSource) => {
         const deps = mcpDeps()
         const errors: string[] = []
+        // An edit changes the server where it lives: same Claude scope, same project.
+        const scope = source?.claudeScope === 'local' || source?.claudeScope === 'project' ? source.claudeScope : 'user'
+        const project = scope !== 'user' && typeof source?.project === 'string' ? source.project : undefined
+        const previousName = typeof source?.name === 'string' ? source.name : undefined
         for (const target of targets) {
           try {
             if (target === 'claude') {
-              if (previousName && previousName !== config.name) await removeClaudeServer(deps, previousName, 'user').catch(() => undefined)
-              await writeClaudeServer(deps, config, 'user')
-            } else {
-              if (previousName && previousName !== config.name) await removeCodexServer(deps, previousName).catch(() => undefined)
-              await writeCodexServer(deps, config)
-            }
+              if (scope !== 'user' && (!project || !existsSync(project))) throw new Error(`the project folder of this ${scope} server no longer exists`)
+              await writeClaudeServer(deps, config, { scope, project, previousName })
+            } else await writeCodexServer(deps, config, previousName)
           } catch (error) {
             errors.push(`${target === 'claude' ? 'Claude' : 'Codex'}: ${(error as Error).message}`)
           }
@@ -387,7 +409,7 @@ function handlers(): HandlerMap {
         const entry = listMcp().find((e) => e.provider === from && e.config.name === name)
         if (!entry) throw new Error(`${name} was not found`)
         const deps = mcpDeps()
-        if (to === 'claude') await writeClaudeServer(deps, entry.config, 'user')
+        if (to === 'claude') await writeClaudeServer(deps, entry.config)
         else await writeCodexServer(deps, entry.config)
       },
       importJson: async (json: string, targets: ProviderId[]) => {
@@ -396,7 +418,7 @@ function handlers(): HandlerMap {
         let count = 0
         for (const cfg of servers) {
           for (const target of targets) {
-            if (target === 'claude') await writeClaudeServer(deps, cfg, 'user')
+            if (target === 'claude') await writeClaudeServer(deps, cfg)
             else await writeCodexServer(deps, cfg)
           }
           count++
@@ -431,20 +453,26 @@ function handlers(): HandlerMap {
         if (!inBackupDir(file)) throw new Error('Only backups in your backup folder can be restored.')
         if (backupRunning) throw new Error('A backup is already running.')
         backupRunning = true
+        const restoringDuet = Array.isArray(sets) && sets.includes('duet')
         try {
-          const result = await restoreBackup(backupContext(), file, sets, {
-            safetyDir: store.settings.backupDir,
-            onProgress: (done, total) => broadcast({ type: 'backup-progress', phase: 'Restoring', done, total })
-          })
-          if (sets.includes('duet')) {
-            setTimeout(() => {
-              app.relaunch()
-              app.exit(0)
-            }, 1800)
+          if (restoringDuet) {
+            // Duet's own threads are being replaced: stop the agents, save what's pending, and
+            // keep the in-memory copy from ever being written over the restored files.
+            await orchestrator.stopAll()
+            store.freeze()
           }
-          return result
+          return await restoreBackup(backupContext(), file, sets, {
+            safetyDir: store.settings.backupDir,
+            onProgress: (done, total) => broadcast({ type: 'backup-progress', phase: 'Restoring', done, total }),
+            log
+          })
+        } catch (error) {
+          if (restoringDuet) throw new Error(`${(error as Error).message} — Duet will restart to reload your threads.`)
+          throw error
         } finally {
           backupRunning = false
+          // Reload from disk whether or not every file made it.
+          if (restoringDuet) relaunchSoon(1800)
         }
       },
       remove: async (file: string) => {
@@ -661,6 +689,7 @@ async function bootstrap(): Promise<void> {
   )
 
   registerIpc(handlers(), isTrusted)
+  lockDownBrowserSession()
   buildMenu()
   createWindow()
   void refreshProviders(false)

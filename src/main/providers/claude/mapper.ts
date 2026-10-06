@@ -245,8 +245,6 @@ export class ClaudeMapper {
       this.upsertText(state, true)
       return
     }
-    const item = this.texts.get(state.itemId)
-    if (item) item.text = state.text
     this.emit({ type: 'delta', itemId: state.itemId, field: 'text', delta })
   }
 

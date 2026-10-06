@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Settings, Thread, ThreadMeta, TimelineItem } from '@shared/types'
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -38,6 +38,35 @@ function readJson<T>(path: string): T | null {
   }
 }
 
+type ReadResult<T> = { ok: true; value: T } | { ok: false; reason: 'missing' | 'corrupt' | 'unreadable'; error?: string }
+
+/** Tells a damaged file (set it aside) from one that just can't be read right now (leave it alone). */
+function readJsonFile<T>(path: string): ReadResult<T> {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' ? { ok: false, reason: 'missing' } : { ok: false, reason: 'unreadable', error: code ?? (error as Error).message }
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) as T }
+  } catch {
+    return { ok: false, reason: 'corrupt' }
+  }
+}
+
+/** Moves a damaged file out of the way (keeping it) and returns its new name. */
+function setAside(path: string): string | null {
+  const kept = `${path}.corrupt-${Date.now()}`
+  try {
+    renameSync(path, kept)
+    return kept
+  } catch {
+    return null
+  }
+}
+
 interface ThreadFile {
   meta: ThreadMeta
   items: TimelineItem[]
@@ -55,6 +84,10 @@ export class Store {
   private dirty = new Set<string>()
   private indexDirty = false
   private timer: NodeJS.Timeout | null = null
+  /** Threads whose file couldn't be read: never overwritten until Duet restarts and reads it. */
+  private protectedIds = new Set<string>()
+  /** Set while a backup of Duet's own data is restored: nothing may be written over it. */
+  private frozen = false
 
   constructor(root: string) {
     this.root = root
@@ -63,7 +96,9 @@ export class Store {
     this.settingsPath = join(root, 'settings.json')
     this.indexPath = join(this.threadsDir, 'index.json')
     for (const dir of [root, this.threadsDir, this.attachmentsDir]) mkdirSync(dir, { recursive: true })
-    const saved = readJson<Partial<Settings>>(this.settingsPath) ?? {}
+    const read = readJsonFile<Partial<Settings>>(this.settingsPath)
+    if (!read.ok && read.reason === 'corrupt') setAside(this.settingsPath)
+    const saved = read.ok && read.value && typeof read.value === 'object' ? read.value : {}
     this.settings = { ...DEFAULT_SETTINGS, ...saved, defaultModels: { ...saved.defaultModels }, defaultEfforts: { ...saved.defaultEfforts } }
     this.loadIndex()
   }
@@ -97,8 +132,18 @@ export class Store {
 
   updateSettings(patch: Partial<Settings>): Settings {
     this.settings = { ...this.settings, ...patch }
-    writeFileAtomic(this.settingsPath, JSON.stringify(this.settings, null, 2))
+    if (!this.frozen) writeFileAtomic(this.settingsPath, JSON.stringify(this.settings, null, 2))
     return this.settings
+  }
+
+  /** Writes everything pending, then stops writing for good (Duet relaunches after a restore). */
+  freeze(): void {
+    this.flush()
+    this.frozen = true
+  }
+
+  get isFrozen(): boolean {
+    return this.frozen
   }
 
   listMetas(): ThreadMeta[] {
@@ -112,8 +157,25 @@ export class Store {
   getItems(id: string): TimelineItem[] {
     let items = this.items.get(id)
     if (!items) {
-      const file = readJson<ThreadFile>(join(this.threadsDir, `${id}.json`))
-      items = Array.isArray(file?.items) ? file.items : []
+      const path = join(this.threadsDir, `${id}.json`)
+      const read = readJsonFile<ThreadFile>(path)
+      const valid = read.ok && Array.isArray(read.value?.items)
+      items = valid && read.ok ? read.value.items : []
+      if (!valid && !(!read.ok && read.reason === 'missing')) {
+        // Never answer a damaged or unreadable file with an empty thread that later overwrites it.
+        let text: string
+        if (!read.ok && read.reason === 'unreadable') {
+          this.protectedIds.add(id)
+          text = `Duet couldn’t read this thread’s saved file (${read.error}). It hasn’t been touched — restart Duet to try again. New messages here won’t be saved until then.`
+        } else {
+          const kept = setAside(path)
+          text = kept
+            ? `This thread’s saved file was damaged, so Duet set it aside as ${basename(kept)} (in ${this.threadsDir}) and started the thread fresh.`
+            : `This thread’s saved file is damaged and couldn’t be moved aside. It hasn’t been touched.`
+          if (!kept) this.protectedIds.add(id)
+        }
+        items = [{ kind: 'notice', id: `n-unreadable-${Date.now()}`, ts: Date.now(), level: 'error', text }]
+      }
       // Streaming flags never survive a restart.
       for (const item of items) {
         if ((item.kind === 'assistant' || item.kind === 'reasoning') && item.streaming) item.streaming = false
@@ -151,13 +213,14 @@ export class Store {
     this.metas.delete(id)
     this.items.delete(id)
     this.dirty.delete(id)
+    if (this.frozen) return
     rmSync(join(this.threadsDir, `${id}.json`), { force: true })
     this.indexDirty = true
     this.schedule()
   }
 
   private schedule(): void {
-    if (this.timer) return
+    if (this.timer || this.frozen) return
     this.timer = setTimeout(() => {
       this.timer = null
       this.flush()
@@ -169,9 +232,10 @@ export class Store {
       clearTimeout(this.timer)
       this.timer = null
     }
+    if (this.frozen) return
     for (const id of this.dirty) {
       const meta = this.metas.get(id)
-      if (!meta) continue
+      if (!meta || this.protectedIds.has(id)) continue
       const items = this.items.get(id) ?? []
       try {
         writeFileAtomic(join(this.threadsDir, `${id}.json`), JSON.stringify({ meta, items } satisfies ThreadFile))

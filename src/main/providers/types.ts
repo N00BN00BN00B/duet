@@ -63,6 +63,10 @@ export interface ProviderAdapter {
   /** Starts a turn. Resolves once the agent accepted it; progress arrives through `emit`. */
   startTurn(req: TurnRequest, emit: Emit): Promise<void>
   interrupt(threadId: string): Promise<void>
+  /** Stop pressed while the turn is still starting: abandon the start if that's possible. */
+  cancelStart?(threadId: string): void
+  /** Reports whether a turn is running for the thread. */
+  isActive?(threadId: string): boolean
   /** Answers a pending approval. Returns false when the request is no longer pending. */
   respond(threadId: string, itemId: string, decision: ApprovalDecision): boolean
   /** Applies a new access mode to a live session, if the provider supports it mid-session. */

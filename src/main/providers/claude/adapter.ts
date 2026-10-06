@@ -29,6 +29,8 @@ export interface ClaudeDeps {
   /** Returns base64 image data ready for the Claude API (resized if needed). */
   prepareImage: (path: string, mime: string) => { data: string; mediaType: string } | null
   log?: (...args: unknown[]) => void
+  /** How long Claude gets to wind down after Stop before its process is ended. */
+  interruptGraceMs?: number
 }
 
 const IDLE_KILL_MS = 15 * 60 * 1000
@@ -68,6 +70,8 @@ class ClaudeSession {
   exitCode: number | null = null
   idleTimer: NodeJS.Timeout | null = null
   interruptTimer: NodeJS.Timeout | null = null
+  /** Incremented for every turn, so timers armed for an old turn can never touch a newer one. */
+  turnSeq = 0
   initResponse: Json = null
   onExit?: () => void
   onCommands?: (commands: SlashCommand[]) => void
@@ -436,6 +440,11 @@ export class ClaudeAdapter implements ProviderAdapter {
     const text = pathLines.length ? `${req.text}\n\n${pathLines.join('\n')}` : req.text
     content.push({ type: 'text', text })
     session.mapper.beginTurn()
+    if (session.interruptTimer) {
+      clearTimeout(session.interruptTimer)
+      session.interruptTimer = null
+    }
+    session.turnSeq++
     session.turnActive = true
     try {
       session.write({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: session.sessionId })
@@ -470,15 +479,25 @@ export class ClaudeAdapter implements ProviderAdapter {
       session.respondControl(approval.requestId, { behavior: 'deny', message: 'Interrupted by the user.', interrupt: true, toolUseID: approval.toolUseId })
       session.approvals.delete(itemId)
     }
+    // Pressing Stop twice re-arms one timer instead of leaving an older one behind that could
+    // kill the next turn.
+    const turn = session.turnSeq
+    if (session.interruptTimer) clearTimeout(session.interruptTimer)
     session.interruptTimer = setTimeout(() => {
       // Claude didn't wind down on its own; stop the process. The exit handler ends the turn.
-      if (session.turnActive) session.kill()
-    }, 8000)
+      if (session.turnActive && session.turnSeq === turn) session.kill()
+    }, this.deps.interruptGraceMs ?? 8000)
     try {
       await session.request({ subtype: 'interrupt' }, 6000)
     } catch {
       // The timer above takes care of a stuck process.
     }
+  }
+
+  /** Stop during start-up: a Claude still initializing (MCP servers can take a while) is ended. */
+  cancelStart(threadId: string): void {
+    const session = this.sessions.get(threadId)
+    if (session && !session.turnActive && !session.initResponse) session.kill()
   }
 
   respond(threadId: string, itemId: string, decision: ApprovalDecision): boolean {

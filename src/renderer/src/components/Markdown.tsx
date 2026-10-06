@@ -3,7 +3,7 @@ import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { duet } from '@/lib/api'
 import { highlight, normalizeLang } from '@/lib/highlight'
-import { IconCheck, IconCopy } from './icons'
+import { IconCheck, IconCopy, IconImage } from './icons'
 
 function textOf(node: ReactNode): string {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
@@ -69,6 +69,42 @@ function resolveSrc(src: string | undefined): string | undefined {
   return src
 }
 
+function remoteHost(src: string): string | null {
+  if (!/^(https?:)?\/\//i.test(src)) return null
+  try {
+    return new URL(src, 'https://x').host || null
+  } catch {
+    return 'unknown site'
+  }
+}
+
+/**
+ * Images from the web load only when clicked: fetching them on sight would tell any site an
+ * agent (or a prompt-injected page) names that you read the reply — and could carry data out in
+ * the URL.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const [allowed, setAllowed] = useState(false)
+  const resolved = resolveSrc(src)
+  const host = resolved ? remoteHost(resolved) : null
+  if (!resolved) return null
+  if (host && !allowed) {
+    return (
+      <button
+        type="button"
+        onClick={() => setAllowed(true)}
+        title={resolved}
+        className="press inline-flex max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2.5 py-1 align-middle text-[12px] text-fg-3 hover:border-line-strong hover:text-fg-2"
+        data-testid="remote-image"
+      >
+        <IconImage size={13} />
+        <span className="truncate">{alt ? `${alt} · ` : ''}Load image from {host}</span>
+      </button>
+    )
+  }
+  return <img src={resolved} alt={alt ?? ''} loading="lazy" />
+}
+
 function makeComponents(live: boolean): Components {
   return {
     pre({ children }) {
@@ -95,7 +131,7 @@ function makeComponents(live: boolean): Components {
       )
     },
     img({ src, alt }) {
-      return <img src={resolveSrc(typeof src === 'string' ? src : undefined)} alt={alt ?? ''} loading="lazy" />
+      return <MarkdownImage src={typeof src === 'string' ? src : undefined} alt={alt} />
     }
   }
 }

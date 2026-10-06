@@ -3,6 +3,9 @@ import { unifiedDiff } from '@shared/diff'
 import { basename, displayPath, firstLine, truncate } from '@shared/paths'
 import type { Emit } from '../types'
 
+/** Upper bound for command output a mapper keeps in memory while it streams. */
+const MAX_TRACKED_OUTPUT = 256 * 1024
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any
 
@@ -335,9 +338,9 @@ export class CodexThreadMapper {
     const key = `x-${itemId}`
     const existing = this.items.get(key)
     if (existing && (existing.kind === 'assistant' || existing.kind === 'reasoning')) {
-      const wasEmpty = !existing.text
-      existing.text += delta
-      if (wasEmpty) this.emit({ type: 'item', item: { ...existing, streaming: true } })
+      const next = { ...existing, text: existing.text + delta }
+      this.items.set(key, next)
+      if (!existing.text) this.emit({ type: 'item', item: { ...next, streaming: true } })
       else this.emit({ type: 'delta', itemId: key, field: 'text', delta })
       return
     }
@@ -369,7 +372,10 @@ export class CodexThreadMapper {
     const key = `x-${itemId}`
     const existing = this.items.get(key)
     if (!existing || existing.kind !== 'tool') return
-    existing.output = (existing.output ?? '') + delta
+    // Keep only the tail of very chatty commands; the timeline caps what it shows anyway.
+    let output = (existing.output ?? '') + delta
+    if (output.length > MAX_TRACKED_OUTPUT * 2) output = output.slice(-MAX_TRACKED_OUTPUT)
+    this.items.set(key, { ...existing, output })
     this.emit({ type: 'delta', itemId: key, field: 'output', delta })
   }
 

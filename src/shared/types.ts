@@ -183,6 +183,8 @@ export interface NativeSession {
   id: string
   /** Number of timeline items this native session has already "seen". */
   syncedTo: number
+  /** Last cumulative cost the agent reported for this session (Claude reports running totals). */
+  costTotal?: number
 }
 
 export interface ContextUsage {
@@ -269,7 +271,8 @@ export type DuetEvent =
   | { type: 'thread-meta'; meta: ThreadMeta }
   | { type: 'thread-removed'; id: string }
   | { type: 'item'; threadId: string; item: TimelineItem }
-  | { type: 'item-delta'; threadId: string; itemId: string; field: 'text' | 'output'; delta: string }
+  /** `offset` is where the chunk starts in the field, so a chunk is never applied twice. */
+  | { type: 'item-delta'; threadId: string; itemId: string; field: 'text' | 'output'; delta: string; offset: number }
   | { type: 'provider-status'; status: ProviderStatus }
   | { type: 'terminal-data'; id: string; data: string }
   | { type: 'terminal-exit'; id: string; code: number }
@@ -322,6 +325,14 @@ export interface McpServerConfig {
 }
 
 export type McpScope = 'user' | 'project' | 'local' | 'plugin' | 'cloud'
+
+/** The server an edit started from, so it is changed where it lives. */
+export interface McpEditSource {
+  name: string
+  /** Where Claude keeps it (user, local or project). */
+  claudeScope?: McpScope
+  project?: string
+}
 
 export interface McpEntry {
   provider: ProviderId

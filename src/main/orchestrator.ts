@@ -49,11 +49,25 @@ function capOutput(text: string | undefined): string | undefined {
   return `[… ${Math.round((text.length - MAX_TOOL_OUTPUT) / 1024)} KB of earlier output trimmed …]\n` + text.slice(-MAX_TOOL_OUTPUT)
 }
 
+interface Run {
+  provider: ProviderId
+  startedAt: number
+  /** The adapter accepted the turn (startTurn resolved). */
+  started: boolean
+  /** Stop was pressed; honoured as soon as the turn can be interrupted. */
+  cancelled: boolean
+}
+
+/** Copies an item so the store never shares objects with an adapter that keeps mutating its own copy. */
+function cloneItem<T extends TimelineItem>(item: T): T {
+  return { ...item }
+}
+
 export class Orchestrator {
   private readonly store: Store
   private readonly adapters: Record<ProviderId, ProviderAdapter>
-  private running = new Map<string, { provider: ProviderId; startedAt: number }>()
-  private pendingDeltas = new Map<string, { threadId: string; itemId: string; field: 'text' | 'output'; delta: string }>()
+  private running = new Map<string, Run>()
+  private pendingDeltas = new Map<string, { threadId: string; itemId: string; field: 'text' | 'output'; delta: string; offset: number }>()
   private deltaTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly deps: OrchestratorDeps) {
@@ -68,6 +82,9 @@ export class Orchestrator {
   }
 
   get(id: string): Thread | null {
+    // Deltas already applied to the store must reach the renderer before the snapshot does,
+    // otherwise they would be applied twice.
+    this.flushDeltas()
     return this.store.getThread(id)
   }
 
@@ -164,7 +181,14 @@ export class Orchestrator {
     const thread = this.store.getThread(id)
     if (!thread) return null
     const now = Date.now()
-    const items = (JSON.parse(JSON.stringify(thread.items)) as TimelineItem[]).filter((i) => i.kind !== 'approval' || i.status !== 'pending')
+    const items = (JSON.parse(JSON.stringify(thread.items)) as TimelineItem[])
+      .filter((i) => i.kind !== 'approval' || i.status !== 'pending')
+      .map((i): TimelineItem => {
+        // Nothing keeps running in a fork.
+        if ((i.kind === 'assistant' || i.kind === 'reasoning') && i.streaming) return { ...i, streaming: false }
+        if (i.kind === 'tool' && i.status === 'running') return { ...i, status: 'error' }
+        return i
+      })
     const meta: ThreadMeta = {
       ...thread,
       id: randomUUID(),
@@ -195,6 +219,7 @@ export class Orchestrator {
   async send(id: string, input: SendInput): Promise<void> {
     const meta = this.store.getMeta(id)
     if (!meta) throw new Error('Thread not found')
+    if (this.store.isFrozen) throw new Error('Duet is restoring a backup and will restart in a moment.')
     if (this.running.has(id)) throw new Error('The agent is still working. Wait for it to finish or press Stop.')
     const text = input.text.trim()
     if (!text && input.attachments.length === 0) return
@@ -226,7 +251,8 @@ export class Orchestrator {
       unread: false
     }
     this.touch(next)
-    this.running.set(id, { provider, startedAt: now })
+    const run: Run = { provider, startedAt: now, started: false, cancelled: false }
+    this.running.set(id, run)
 
     const emit = (event: RuntimeEvent) => this.onRuntime(id, provider, event)
     const req: TurnRequest = {
@@ -248,7 +274,9 @@ export class Orchestrator {
           req.nativeId = this.store.getMeta(id)?.native[provider]?.id ?? req.nativeId
         }
       }
+      if (run.cancelled) throw new Error('Stopped before the agent started.')
       await adapter.startTurn(req, emit)
+      await this.afterStart(id, run)
     } catch (error) {
       if (error instanceof NativeSessionLostError) {
         const current = this.store.getMeta(id)
@@ -267,39 +295,76 @@ export class Orchestrator {
         })
         const full = buildHandoff(before, 0, provider, { force: true })
         try {
+          if (run.cancelled) throw new Error('Stopped before the agent started.')
           await adapter.startTurn({ ...req, nativeId: undefined, text: withHandoff(full, userText) }, emit)
+          await this.afterStart(id, run)
           return
         } catch (retryError) {
-          this.failTurn(id, provider, (retryError as Error).message)
+          this.failTurn(id, provider, (retryError as Error).message, run)
           return
         }
       }
-      this.failTurn(id, provider, (error as Error).message)
+      this.failTurn(id, provider, (error as Error).message, run)
     }
   }
 
-  private failTurn(id: string, provider: ProviderId, message: string): void {
-    this.running.delete(id)
-    this.push(id, { kind: 'notice', id: `n-${randomUUID()}`, ts: Date.now(), level: 'error', provider, text: message })
+  /** Runs once an adapter accepted a turn: honours a Stop that was pressed while it was starting. */
+  private async afterStart(id: string, run: Run): Promise<void> {
+    run.started = true
+    if (run.cancelled && this.running.get(id) === run) {
+      await this.adapters[run.provider].interrupt(id).catch(() => undefined)
+      this.armStopSafetyNet(id, run)
+    }
+  }
+
+  private failTurn(id: string, provider: ProviderId, message: string, run?: Run): void {
+    // A failure from an older run must never clobber a newer one.
+    const current = this.running.get(id)
+    const stale = run !== undefined && current !== undefined && current !== run
+    if (!stale) this.running.delete(id)
+    // Stop pressed while starting: whatever the start then reported, the user asked for this.
+    const interrupted = run?.cancelled === true
+    this.push(id, {
+      kind: 'notice',
+      id: `n-${randomUUID()}`,
+      ts: Date.now(),
+      level: interrupted ? 'info' : 'error',
+      provider,
+      text: interrupted ? 'Stopped before the agent started.' : message
+    })
     const meta = this.store.getMeta(id)
-    if (meta) {
-      const next = { ...meta, status: 'error' as const, updatedAt: Date.now() }
+    if (meta && !stale) {
+      const next = { ...meta, status: interrupted ? ('idle' as const) : ('error' as const), updatedAt: Date.now() }
       this.touch(next)
-      this.deps.notify?.(next, 'error', message)
+      if (!interrupted) this.deps.notify?.(next, 'error', message)
     }
   }
 
   async stop(id: string): Promise<void> {
     const run = this.running.get(id)
     if (!run) return
+    run.cancelled = true
+    if (!run.started) {
+      // Honoured by afterStart / failTurn once the start settles; cut it short where possible.
+      this.adapters[run.provider].cancelStart?.(id)
+      return
+    }
     await this.adapters[run.provider].interrupt(id)
-    // Safety net: if the adapter had nothing running, end the turn locally.
+    this.armStopSafetyNet(id, run)
+  }
+
+  async stopAll(): Promise<void> {
+    await Promise.all([...this.running.keys()].map((id) => this.stop(id).catch(() => undefined)))
+  }
+
+  /** If the adapter turns out to have nothing running, end the turn locally so the UI never hangs. */
+  private armStopSafetyNet(id: string, run: Run): void {
     setTimeout(() => {
       const still = this.running.get(id)
-      if (still && still === run && !(this.adapters[run.provider] as { isActive?: (t: string) => boolean }).isActive?.(id)) {
+      if (still === run && run.started && !this.adapters[run.provider].isActive?.(id)) {
         this.onRuntime(id, run.provider, { type: 'turn-end', status: 'interrupted' })
       }
-    }, 12_000)
+    }, 12_000).unref?.()
   }
 
   respond(threadId: string, itemId: string, decision: ApprovalDecision): void {
@@ -329,11 +394,11 @@ export class Orchestrator {
 
   // ---------- runtime events ----------
 
-  private queueDelta(threadId: string, itemId: string, field: 'text' | 'output', delta: string): void {
+  private queueDelta(threadId: string, itemId: string, field: 'text' | 'output', delta: string, offset: number): void {
     const key = `${threadId}\u0000${itemId}\u0000${field}`
     const existing = this.pendingDeltas.get(key)
     if (existing) existing.delta += delta
-    else this.pendingDeltas.set(key, { threadId, itemId, field, delta })
+    else this.pendingDeltas.set(key, { threadId, itemId, field, delta, offset })
     if (!this.deltaTimer) {
       this.deltaTimer = setTimeout(() => this.flushDeltas(), DELTA_FLUSH_MS)
     }
@@ -359,12 +424,13 @@ export class Orchestrator {
       case 'native-id': {
         const existing = meta.native[provider]
         if (existing?.id === event.nativeId) return
-        this.touch({ ...meta, native: { ...meta.native, [provider]: { id: event.nativeId, syncedTo: existing?.id === event.nativeId ? existing.syncedTo : 0 } } }, false)
+        // A different native session starts over: nothing seen yet, no cost carried over.
+        this.touch({ ...meta, native: { ...meta.native, [provider]: { id: event.nativeId, syncedTo: 0 } } }, false)
         return
       }
       case 'item': {
         const items = this.store.getItems(threadId)
-        let item = event.item
+        let item = cloneItem(event.item)
         if (item.kind === 'tool' && item.output) item = { ...item, output: capOutput(item.output) }
         const idx = items.findIndex((i) => i.id === item.id)
         this.dropDeltas(threadId, item.id)
@@ -384,14 +450,17 @@ export class Orchestrator {
         const items = this.store.getItems(threadId)
         const item = items.find((i) => i.id === event.itemId)
         if (!item) return
+        let offset: number
         if (event.field === 'text' && (item.kind === 'assistant' || item.kind === 'reasoning')) {
+          offset = item.text.length
           item.text += event.delta
         } else if (event.field === 'output' && item.kind === 'tool') {
-          if ((item.output?.length ?? 0) > MAX_TOOL_OUTPUT) return
+          offset = item.output?.length ?? 0
+          if (offset > MAX_TOOL_OUTPUT) return
           item.output = (item.output ?? '') + event.delta
         } else return
         this.store.markDirty(threadId)
-        this.queueDelta(threadId, event.itemId, event.field, event.delta)
+        this.queueDelta(threadId, event.itemId, event.field, event.delta, offset)
         return
       }
       case 'approval-status': {
@@ -441,6 +510,16 @@ export class Orchestrator {
       }
     }
     const meta = this.store.getMeta(threadId)
+    const native = meta?.native[provider]
+    // Claude reports a running total per session (resumed sessions continue from their saved
+    // total), so a turn costs the difference to the previous total.
+    let turnCost = event.costUsd
+    let costTotal = native?.costTotal
+    if (provider === 'claude' && typeof event.costUsd === 'number' && event.costUsd > 0) {
+      const previous = native?.costTotal ?? 0
+      turnCost = event.costUsd >= previous ? event.costUsd - previous : event.costUsd
+      costTotal = event.costUsd
+    }
     const turn: TurnItem = {
       kind: 'turn',
       id: `t-${randomUUID()}`,
@@ -449,7 +528,7 @@ export class Orchestrator {
       model: event.model ?? meta?.models[provider],
       status: event.status,
       durationMs: event.durationMs ?? Date.now() - run.startedAt,
-      costUsd: event.costUsd,
+      costUsd: turnCost,
       inputTokens: event.inputTokens,
       outputTokens: event.outputTokens
     }
@@ -462,14 +541,13 @@ export class Orchestrator {
     }
     this.store.setItems(threadId, items)
     if (!meta) return
-    const native = meta.native[provider]
     const next: ThreadMeta = {
       ...meta,
       status: event.status === 'failed' ? 'error' : 'idle',
       updatedAt: Date.now(),
       unread: true,
-      costUsd: (meta.costUsd ?? 0) + (event.costUsd ?? 0) || meta.costUsd,
-      native: native ? { ...meta.native, [provider]: { ...native, syncedTo: items.length } } : meta.native
+      costUsd: (meta.costUsd ?? 0) + (turnCost ?? 0) || meta.costUsd,
+      native: native ? { ...meta.native, [provider]: { ...native, syncedTo: items.length, ...(costTotal !== undefined ? { costTotal } : {}) } } : meta.native
     }
     const lastAssistant = [...items].reverse().find((i) => i.kind === 'assistant')
     if (lastAssistant && lastAssistant.kind === 'assistant') next.preview = truncate(firstLine(lastAssistant.text), 140)

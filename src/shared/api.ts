@@ -7,6 +7,7 @@ import type {
   FileSuggestion,
   GitStatus,
   HistoryEntry,
+  McpEditSource,
   McpEntry,
   McpServerConfig,
   NewThreadInput,
@@ -68,7 +69,7 @@ export interface DuetApi {
   }
   mcp: {
     list(cwd?: string): Promise<McpEntry[]>
-    save(config: McpServerConfig, targets: ProviderId[], previousName?: string): Promise<void>
+    save(config: McpServerConfig, targets: ProviderId[], source?: McpEditSource): Promise<void>
     remove(name: string, provider: ProviderId, scope: string, project?: string): Promise<void>
     copy(name: string, from: ProviderId, to: ProviderId): Promise<void>
     importJson(json: string, targets: ProviderId[]): Promise<number>
@@ -81,7 +82,7 @@ export interface DuetApi {
     sets(): Promise<BackupSet[]>
     list(): Promise<BackupInfo[]>
     create(sets: string[]): Promise<BackupInfo>
-    restore(file: string, sets: string[]): Promise<{ restored: number; safetyBackup: string }>
+    restore(file: string, sets: string[]): Promise<{ restored: number; skipped: number; safetyBackup: string }>
     remove(file: string): Promise<void>
     chooseDir(): Promise<string | null>
   }

@@ -194,7 +194,7 @@ export async function applySync(
           if (!raw) throw new Error('server not found in Codex')
           const cfg = codexToConfig(name, raw)
           if (raw.env && typeof raw.env === 'object') cfg.env = Object.fromEntries(Object.entries<Json>(raw.env).map(([k, v]) => [k, String(v)]))
-          await writeClaudeServer(opts.mcp, cfg, 'user')
+          await writeClaudeServer(opts.mcp, cfg)
         }
       }
       applied++

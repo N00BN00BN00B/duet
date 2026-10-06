@@ -12,6 +12,7 @@ import type {
   TimelineItem
 } from '@shared/types'
 import { duet, errorMessage, terminalBus } from '@/lib/api'
+import { applyDelta } from '@/lib/timeline'
 
 export type View = 'home' | 'thread' | 'history' | 'mcp' | 'sync' | 'backups' | 'settings'
 export type RightPanel = 'browser' | 'changes' | null
@@ -192,19 +193,6 @@ function upsertItem(list: TimelineItem[], item: TimelineItem): TimelineItem[] {
   return [...list, item]
 }
 
-function applyDelta(list: TimelineItem[], itemId: string, field: 'text' | 'output', delta: string): TimelineItem[] | null {
-  for (let i = list.length - 1; i >= 0; i--) {
-    const item = list[i]
-    if (item.id !== itemId) continue
-    const copy = list.slice()
-    if (field === 'text' && (item.kind === 'assistant' || item.kind === 'reasoning')) copy[i] = { ...item, text: item.text + delta }
-    else if (field === 'output' && item.kind === 'tool') copy[i] = { ...item, output: (item.output ?? '') + delta }
-    else return null
-    return copy
-  }
-  return null
-}
-
 // ---------- events ----------
 
 let commandHandler: ((name: string) => void) | null = null
@@ -219,12 +207,16 @@ function handleEvent(e: DuetEvent): void {
       set((s) => ({ threads: { ...s.threads, [e.meta.id]: e.meta } }))
       const wasBusy = before && (before.status === 'running' || before.status === 'approval')
       const pending = get().queued[e.meta.id]
-      if (wasBusy && e.meta.status === 'idle' && pending) {
+      if (wasBusy && pending && e.meta.status === 'idle') {
         clearQueued(e.meta.id)
         void sendMessage(e.meta.id, pending).catch((error) => {
-          queueMessage(e.meta.id, pending)
+          restoreQueued(e.meta.id, pending)
           toastError(error)
         })
+      } else if (wasBusy && pending && e.meta.status === 'error') {
+        // The turn failed: don't fire the follow-up blindly, hand it back for review.
+        restoreQueued(e.meta.id, pending)
+        toast('The turn stopped with an error, so your queued message wasn’t sent. It’s back in the message box.', 'info')
       }
       if (e.meta.unread && get().currentId === e.meta.id && get().view === 'thread' && document.hasFocus()) {
         void duet.threads.update(e.meta.id, { unread: false }).catch(() => undefined)
@@ -248,7 +240,7 @@ function handleEvent(e: DuetEvent): void {
       set((s) => {
         const list = s.items[e.threadId]
         if (!list) return {}
-        const next = applyDelta(list, e.itemId, e.field, e.delta)
+        const next = applyDelta(list, e.itemId, e.field, e.delta, e.offset)
         return next ? { items: { ...s.items, [e.threadId]: next } } : {}
       })
       break
@@ -462,6 +454,16 @@ export function queueMessage(threadId: string, draft: Draft): void {
       ? { text: [existing.text, draft.text].filter(Boolean).join('\n\n'), attachments: [...existing.attachments, ...draft.attachments] }
       : draft
     return { queued: { ...s.queued, [threadId]: merged } }
+  })
+}
+
+/** Moves a queued message back into the thread's message box, ahead of anything typed since. */
+export function restoreQueued(threadId: string, queued: Draft): void {
+  clearQueued(threadId)
+  const current = get().drafts[threadId]
+  setDraft(threadId, {
+    text: [queued.text, current?.text].filter(Boolean).join('\n\n'),
+    attachments: [...queued.attachments, ...(current?.attachments ?? [])]
   })
 }
 
