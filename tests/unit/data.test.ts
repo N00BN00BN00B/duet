@@ -295,6 +295,6 @@ describe('timeline grouping', () => {
     const blocks = buildBlocks(items)
     expect(blocks.map((b) => (b.type === 'work' ? `work(${b.entries.length},${b.showHeader})` : `${b.item.kind}${b.showHeader ? '+h' : ''}`))).toEqual(['user', 'work(3,true)', 'assistant', 'turn', 'switch', 'user', 'assistant+h'])
     const work = blocks.find((b) => b.type === 'work')
-    expect(work && work.type === 'work' && summarize(work.entries)).toBe('Thought · Read 1 file · Changed 1 file')
+    expect(work && work.type === 'work' && summarize(work.entries)).toBe('Read a file, edited a file')
   })
 })

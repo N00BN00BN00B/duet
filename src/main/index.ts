@@ -27,6 +27,7 @@ import { applySync, scanSync } from './features/sync'
 import { createBackup, defaultContext, describeSets, listBackups, restoreBackup } from './features/backup'
 import { fakeMcpDeps } from './features/fakeMcp'
 import { initLogger, logLine } from './logger'
+import { saveToolImage } from './util/toolImages'
 
 protocol.registerSchemesAsPrivileged([{ scheme: FILE_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
@@ -502,11 +503,12 @@ function handlers(): HandlerMap {
       import: async (provider: ProviderId, nativeId: string) => {
         const existing = orchestrator.list().find((m) => (m.origin?.provider === provider && m.origin.nativeId === nativeId) || m.native[provider]?.id === nativeId)
         if (existing) return existing
+        const saveImage = (data: string, mime: string) => saveToolImage(store.attachmentsDir, data, mime)
         const loaded =
           provider === 'claude'
-            ? loadClaudeSession(nativeId)
+            ? loadClaudeSession(nativeId, saveImage)
             : adapters.codex instanceof CodexAdapter
-              ? await loadCodexThread((m, p, t) => (adapters.codex as CodexAdapter).rpcRequest(m, p, t), nativeId)
+              ? await loadCodexThread((m, p, t) => (adapters.codex as CodexAdapter).rpcRequest(m, p, t), nativeId, saveImage)
               : null
         if (!loaded) throw new Error('History is not available for this provider')
         const cwd = loaded.cwd && existsSync(loaded.cwd) ? loaded.cwd : homedir()
@@ -658,10 +660,10 @@ async function bootstrap(): Promise<void> {
   })
 
   adapters = FAKE
-    ? { claude: new FakeAdapter('claude'), codex: new FakeAdapter('codex') }
+    ? { claude: new FakeAdapter('claude', undefined, store.attachmentsDir), codex: new FakeAdapter('codex', undefined, store.attachmentsDir) }
     : {
         claude: new ClaudeAdapter({ binary: () => findBinary('claude', store.settings.claudePath), env: getEnv, attachmentsDir: store.attachmentsDir, prepareImage, log }),
-        codex: new CodexAdapter({ binary: () => findBinary('codex', store.settings.codexPath), env: getEnv, appVersion: app.getVersion(), log })
+        codex: new CodexAdapter({ binary: () => findBinary('codex', store.settings.codexPath), env: getEnv, appVersion: app.getVersion(), attachmentsDir: store.attachmentsDir, log })
       }
 
   orchestrator = new Orchestrator({

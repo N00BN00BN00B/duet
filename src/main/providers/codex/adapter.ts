@@ -12,6 +12,7 @@ import { binaryVersion } from '../../env'
 import { NativeSessionLostError, type Emit, type ProviderAdapter, type TurnRequest } from '../types'
 import { CodexRpc, RpcError } from './rpc'
 import { CodexThreadMapper, codexRateWindows, unwrapShell } from './mapper'
+import { saveToolImage } from '../../util/toolImages'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any
@@ -23,6 +24,8 @@ export interface CodexDeps {
   log?: (...args: unknown[]) => void
   /** How long Codex gets to confirm a Stop before the turn is ended locally. */
   interruptGraceMs?: number
+  /** Where pictures returned by tools (MCP screenshots…) are kept. */
+  attachmentsDir?: string
 }
 
 const SERVER_IDLE_MS = 30 * 60 * 1000
@@ -162,7 +165,9 @@ export class CodexAdapter implements ProviderAdapter {
   private stateFor(req: TurnRequest, emit: Emit): ThreadState {
     let st = this.threads.get(req.threadId)
     if (!st) {
-      const mapper = new CodexThreadMapper({ cwd: req.cwd, home: homedir(), now: Date.now }, emit)
+      const dir = this.deps.attachmentsDir
+      const saveImage = dir ? (data: string, mime: string) => saveToolImage(dir, data, mime) : undefined
+      const mapper = new CodexThreadMapper({ cwd: req.cwd, home: homedir(), now: Date.now, saveImage }, emit)
       st = { duetId: req.threadId, loaded: false, cwd: req.cwd, emit, mapper, active: false, interrupted: false, turnSeq: 0, startedAt: 0 }
       this.threads.set(req.threadId, st)
     }

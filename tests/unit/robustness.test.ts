@@ -14,11 +14,13 @@ import type { Emit, ProviderAdapter, RuntimeEvent, TurnRequest } from '../../src
 import { ClaudeAdapter } from '../../src/main/providers/claude/adapter'
 import { ClaudeMapper } from '../../src/main/providers/claude/mapper'
 import { CodexAdapter } from '../../src/main/providers/codex/adapter'
-import { CodexThreadMapper } from '../../src/main/providers/codex/mapper'
+import { CodexThreadMapper, codexItemToTimeline } from '../../src/main/providers/codex/mapper'
+import { parseClaudeTranscript } from '../../src/main/features/history'
+import { parseImageDataUrl, saveToolImage } from '../../src/main/util/toolImages'
 import { BACKUP_SETS, collectFiles, createBackup, restoreBackup, type BackupContext } from '../../src/main/features/backup'
 import { fakeMcpDeps } from '../../src/main/features/fakeMcp'
 import { writeClaudeServer, writeCodexServer, type McpWriteDeps } from '../../src/main/features/mcp'
-import { applyDelta } from '../../src/renderer/src/lib/timeline'
+import { applyDelta, groupImages, summarize, type WorkEntry } from '../../src/renderer/src/lib/timeline'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -529,5 +531,91 @@ describe('MCP edits', () => {
     expect(readCodex(home).mcp_servers.files).toMatchObject({ command: 'node', enabled: false, startup_timeout_sec: 30 })
     await writeCodexServer(deps, { name: 'files', transport: 'stdio', command: 'node', enabled: true })
     expect(readCodex(home).mcp_servers.files.enabled).toBeUndefined()
+  })
+})
+
+describe('pictures from tools', () => {
+  // 1×1 PNG
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+  it('saves each picture once, named by its content', () => {
+    const dir = tmp('pics')
+    const a = saveToolImage(dir, PNG, 'image/png')!
+    expect(a).toMatch(/tool-[0-9a-f]{32}\.png$/)
+    expect(readFileSync(a).subarray(1, 4).toString()).toBe('PNG')
+    expect(saveToolImage(dir, PNG, 'IMAGE/PNG')).toBe(a)
+    expect(readdirSync(dir)).toHaveLength(1)
+    expect(saveToolImage(dir, PNG, 'application/pdf')).toBeNull()
+    expect(saveToolImage(dir, '', 'image/png')).toBeNull()
+    expect(parseImageDataUrl(`data:image/png;base64,${PNG}`)).toEqual({ mediaType: 'image/png', data: PNG })
+    expect(parseImageDataUrl('https://example.com/a.png')).toBeNull()
+  })
+
+  it('shows the screenshot an MCP tool returned instead of "[image]"', () => {
+    const dir = tmp('mcp-pics')
+    const ctx = { cwd: '/repo', now: () => 1, saveImage: (d: string, m: string) => saveToolImage(dir, d, m) }
+    const item = codexItemToTimeline(
+      {
+        type: 'mcpToolCall',
+        id: 'm1',
+        server: 'rogold-studio',
+        tool: 'roblox_screenshot',
+        status: 'completed',
+        arguments: { maxSize: 1024 },
+        result: { content: [{ type: 'image', data: PNG, mimeType: 'image/png' }, { type: 'text', text: '{"success":true}' }], structuredContent: null },
+        durationMs: 4100
+      },
+      ctx
+    ) as ToolItem
+    expect(item.images).toHaveLength(1)
+    expect(existsSync(item.images![0])).toBe(true)
+    expect(item.output).toBe('{"success":true}')
+    expect(item).toMatchObject({ tool: 'mcp', title: 'roblox_screenshot', detail: 'rogold-studio', status: 'done' })
+  })
+
+  it('keeps inline pictures from dynamic tools and never fetches web ones', () => {
+    const dir = tmp('dyn-pics')
+    const ctx = { cwd: '/repo', now: () => 1, saveImage: (d: string, m: string) => saveToolImage(dir, d, m) }
+    const item = codexItemToTimeline(
+      {
+        type: 'dynamicToolCall',
+        id: 'd1',
+        tool: 'capture',
+        status: 'completed',
+        success: true,
+        arguments: {},
+        contentItems: [
+          { type: 'inputText', text: 'captured' },
+          { type: 'inputImage', imageUrl: `data:image/png;base64,${PNG}` },
+          { type: 'inputImage', imageUrl: 'https://tracker.example/pixel.png' }
+        ]
+      },
+      ctx
+    ) as ToolItem
+    expect(item.output).toBe('captured')
+    expect(item.images).toHaveLength(1)
+  })
+
+  it('brings pictures along when a Claude session is imported', () => {
+    const dir = tmp('claude-pics')
+    const lines = [
+      { type: 'assistant', uuid: 'a1', timestamp: '2026-01-01T00:00:00Z', message: { id: 'm1', content: [{ type: 'tool_use', id: 't1', name: 'mcp__browser__screenshot', input: {} }] } },
+      { type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } }, { type: 'text', text: 'ok' }] }] } }
+    ]
+    const { items } = parseClaudeTranscript(lines.map((l) => JSON.stringify(l)).join('\n'), '/repo', (d, m) => saveToolImage(dir, d, m))
+    const tool = items.find((i) => i.kind === 'tool') as ToolItem
+    expect(tool.images).toHaveLength(1)
+    expect(tool.output).toBe('ok')
+  })
+
+  it('summarizes work in one plain sentence and collects its pictures', () => {
+    const tool = (id: string, kind: ToolItem['tool'], extra: Partial<ToolItem> = {}): ToolItem => ({ kind: 'tool', id, ts: 1, provider: 'codex', tool: kind, name: kind, title: id, status: 'done', ...extra })
+    const thought: WorkEntry = { kind: 'reasoning', id: 'r', ts: 1, provider: 'codex', text: 'hmm' }
+    expect(summarize([thought])).toBe('Thought')
+    expect(summarize([tool('a', 'command')])).toBe('Ran a command')
+    expect(summarize([tool('a', 'command'), tool('b', 'command'), tool('c', 'mcp', { images: ['/x.png'] }), thought])).toBe('Ran 2 commands, used an MCP tool')
+    expect(summarize([tool('src/a.ts', 'edit'), tool('src/a.ts', 'edit'), tool('src/b.ts', 'write'), tool('q', 'search')])).toBe('Edited 2 files, searched the code')
+    expect(summarize([tool('https://x.dev', 'web'), tool('how to', 'web')])).toBe('Searched the web, fetched a page')
+    expect(groupImages([tool('a', 'mcp', { images: ['/1.png', '/2.png'] }), tool('b', 'image', { images: ['/2.png'] }), thought])).toEqual(['/1.png', '/2.png'])
   })
 })

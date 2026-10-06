@@ -46,32 +46,40 @@ export function buildBlocks(items: TimelineItem[]): Block[] {
 }
 
 
+const counted = (n: number, one: string, many: string) => (n <= 0 ? '' : n === 1 ? one : many.replace('#', String(n)))
+
+/** One plain sentence for a work group, e.g. "Read 3 files, edited a file, ran 2 commands". */
 export function summarize(entries: WorkEntry[]): string {
-  const count = (fn: (e: WorkEntry) => boolean) => entries.filter(fn).length
-  const parts: string[] = []
-  const thought = count((e) => e.kind === 'reasoning')
-  const reads = count((e) => e.kind === 'tool' && e.tool === 'read')
-  const files = new Set(entries.filter((e): e is ToolItem => e.kind === 'tool' && (e.tool === 'edit' || e.tool === 'write')).map((e) => e.title)).size
-  const commands = count((e) => e.kind === 'tool' && e.tool === 'command')
-  const searches = count((e) => e.kind === 'tool' && e.tool === 'search')
-  const web = count((e) => e.kind === 'tool' && e.tool === 'web')
-  const mcp = count((e) => e.kind === 'tool' && e.tool === 'mcp')
-  const agents = count((e) => e.kind === 'tool' && e.tool === 'agent')
-  const plans = count((e) => e.kind === 'tool' && e.tool === 'todo')
-  const other = count((e) => e.kind === 'tool' && (e.tool === 'other' || e.tool === 'skill' || e.tool === 'image'))
-  if (thought) parts.push('Thought')
-  if (reads) parts.push(`Read ${reads} file${reads === 1 ? '' : 's'}`)
-  if (files) parts.push(`Changed ${files} file${files === 1 ? '' : 's'}`)
-  if (commands) parts.push(`Ran ${commands} command${commands === 1 ? '' : 's'}`)
-  if (searches) parts.push(`Searched ${searches} time${searches === 1 ? '' : 's'}`)
-  if (web) parts.push(`Browsed the web${web > 1 ? ` ${web}×` : ''}`)
-  if (mcp) parts.push(`Used ${mcp} MCP tool${mcp === 1 ? '' : 's'}`)
-  if (agents) parts.push(`Ran ${agents} subagent${agents === 1 ? '' : 's'}`)
-  if (plans) parts.push('Updated the plan')
-  if (other) parts.push(`${other} other action${other === 1 ? '' : 's'}`)
-  return parts.join(' · ') || 'Worked'
+  const tools = entries.filter((e): e is ToolItem => e.kind === 'tool')
+  const count = (fn: (t: ToolItem) => boolean) => tools.filter(fn).length
+  const fetches = count((t) => t.tool === 'web' && /^https?:\/\//i.test(t.title))
+  const generated = count((t) => t.tool === 'image' && t.name === 'imageGeneration')
+  const parts = [
+    counted(count((t) => t.tool === 'read'), 'read a file', 'read # files'),
+    counted(new Set(tools.filter((t) => (t.tool === 'edit' || t.tool === 'write') && t.status !== 'declined').map((t) => t.title)).size, 'edited a file', 'edited # files'),
+    counted(count((t) => t.tool === 'command'), 'ran a command', 'ran # commands'),
+    counted(count((t) => t.tool === 'search'), 'searched the code', 'searched the code # times'),
+    counted(count((t) => t.tool === 'web') - fetches, 'searched the web', 'searched the web # times'),
+    counted(fetches, 'fetched a page', 'fetched # pages'),
+    counted(count((t) => t.tool === 'mcp'), 'used an MCP tool', 'used # MCP tools'),
+    counted(count((t) => t.tool === 'agent'), 'ran a subagent', 'ran # subagents'),
+    count((t) => t.tool === 'todo') ? 'updated the plan' : '',
+    counted(count((t) => t.tool === 'image') - generated, 'looked at an image', 'looked at # images'),
+    counted(generated, 'generated an image', 'generated # images'),
+    counted(count((t) => t.tool === 'skill'), 'used a skill', 'used # skills'),
+    counted(count((t) => t.tool === 'other'), 'used a tool', 'used # tools')
+  ].filter(Boolean)
+  if (!parts.length) return entries.some((e) => e.kind === 'reasoning') ? 'Thought' : 'Worked'
+  const sentence = parts.join(', ')
+  return sentence[0].toUpperCase() + sentence.slice(1)
 }
 
+/** Pictures the tools in a group produced (screenshots, viewed or generated images). */
+export function groupImages(entries: WorkEntry[]): string[] {
+  const out: string[] = []
+  for (const e of entries) if (e.kind === 'tool') for (const p of e.images ?? []) if (!out.includes(p)) out.push(p)
+  return out
+}
 
 /**
  * Applies a streamed chunk to a copy of the list. `offset` is where the chunk starts, so a chunk

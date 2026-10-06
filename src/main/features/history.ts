@@ -145,7 +145,11 @@ export function findClaudeSessionFile(sessionId: string): string | null {
 }
 
 /** Converts a full Claude session transcript into Duet timeline items. */
-export function parseClaudeTranscript(text: string, cwdHint = ''): { items: TimelineItem[]; cwd: string; model?: string } {
+export function parseClaudeTranscript(
+  text: string,
+  cwdHint = '',
+  saveImage?: (base64: string, mediaType: string) => string | null
+): { items: TimelineItem[]; cwd: string; model?: string } {
   const items: TimelineItem[] = []
   const tools = new Map<string, ToolItem>()
   const textByMessage = new Map<string, AssistantItem>()
@@ -176,6 +180,14 @@ export function parseClaudeTranscript(text: string, cwdHint = ''): { items: Time
           const out = typeof block.content === 'string' ? block.content : Array.isArray(block.content) ? block.content.filter((b: Json) => b?.type === 'text').map((b: Json) => b.text).join('\n') : ''
           tool.output = truncate(out, 64 * 1024)
           tool.status = block.is_error ? 'error' : 'done'
+          // Screenshots and other pictures a tool returned.
+          if (saveImage && Array.isArray(block.content)) {
+            const images = block.content
+              .filter((b: Json) => b?.type === 'image' && b.source?.type === 'base64' && typeof b.source.data === 'string')
+              .map((b: Json) => saveImage(b.source.data, b.source.media_type ?? 'image/png'))
+              .filter((p: string | null): p is string => !!p)
+            if (images.length) tool.images = [...new Set<string>(images)]
+          }
         }
       }
       if (!isRealUserLine(msg)) continue
@@ -210,11 +222,14 @@ export function parseClaudeTranscript(text: string, cwdHint = ''): { items: Time
   return { items, cwd, model }
 }
 
-export function loadClaudeSession(sessionId: string): { items: TimelineItem[]; cwd: string; model?: string; title?: string } {
+export function loadClaudeSession(
+  sessionId: string,
+  saveImage?: (base64: string, mediaType: string) => string | null
+): { items: TimelineItem[]; cwd: string; model?: string; title?: string } {
   const file = findClaudeSessionFile(sessionId)
   if (!file) throw new Error('Claude session file not found')
   const entry = describeClaudeSession(file)
-  const parsed = parseClaudeTranscript(readFileSync(file, 'utf8'), entry?.cwd ?? '')
+  const parsed = parseClaudeTranscript(readFileSync(file, 'utf8'), entry?.cwd ?? '', saveImage)
   return { ...parsed, title: entry?.title }
 }
 
@@ -247,11 +262,15 @@ export async function listCodexThreads(request: CodexRequest, max = 400): Promis
   return out
 }
 
-export async function loadCodexThread(request: CodexRequest, threadId: string): Promise<{ items: TimelineItem[]; cwd: string; model?: string; title?: string }> {
+export async function loadCodexThread(
+  request: CodexRequest,
+  threadId: string,
+  saveImage?: (base64: string, mediaType: string) => string | null
+): Promise<{ items: TimelineItem[]; cwd: string; model?: string; title?: string }> {
   const read: Json = await request('thread/read', { threadId, includeTurns: true }, 60_000).catch(() => request('thread/read', { threadId, includeTurns: false }, 60_000))
   const thread = read?.thread ?? {}
   const cwd: string = thread.cwd ?? ''
-  const ctx = { cwd, home: homedir(), now: Date.now, model: thread.model ?? undefined }
+  const ctx = { cwd, home: homedir(), now: Date.now, model: thread.model ?? undefined, saveImage }
   let rawItems: { item: Json; ts: number }[] = []
   const turns: Json[] = Array.isArray(thread.turns) ? thread.turns : []
   const hasItems = turns.some((t) => Array.isArray(t.items) && t.items.length > 0)

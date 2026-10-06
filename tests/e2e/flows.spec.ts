@@ -83,7 +83,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await expect(page.getByTestId('approval-panel')).toBeHidden()
     await waitIdle(page)
     await expect(page.getByTestId('timeline')).toContainText('Approved')
-    await expect(page.getByTestId('timeline')).toContainText('Ran 1 command')
+    await expect(page.getByTestId('timeline')).toContainText('Ran a command')
   })
 
   test('approval flow: deny a command', async () => {
@@ -104,7 +104,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await expect(page.getByTestId('timeline')).toContainText('Switched to Codex')
     await expect(page.getByTestId('timeline')).toContainText('Picking up from Claude', { timeout: 20_000 })
     await waitIdle(page)
-    await expect(page.getByTestId('timeline')).toContainText('Changed 1 file')
+    await expect(page.getByTestId('timeline')).toContainText('Edited a file')
     await shot(page, '04-switched-to-codex')
     // And back to Claude: only the Codex part is handed back.
     await page.keyboard.press('Meta+1')
@@ -242,6 +242,25 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     } finally {
       server.close()
     }
+  })
+
+  test('screenshots returned by tools show right in the chat', async () => {
+    const { page } = ctx
+    await send(page, 'take a screenshot of the app')
+    await waitIdle(page)
+    const group = page.getByTestId('work-group').last()
+    // Visible without opening the work log.
+    await expect(group.getByTestId('tool-images').locator('img')).toBeVisible()
+    await expect(group).toContainText('Used an MCP tool')
+    await expect(group.getByTestId('work-log')).toHaveCount(0)
+    await group.getByRole('button', { name: /Used an MCP tool/ }).click()
+    await expect(group.getByTestId('tool-row')).toContainText('Called take_screenshot demo-browser')
+    await expect(group.getByTestId('tool-row')).not.toContainText('[image]')
+    await shot(page, '06-tool-screenshot')
+    await group.getByTestId('tool-images').locator('button').click()
+    await expect(page.locator('img.anim-pop')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('img.anim-pop')).toHaveCount(0)
   })
 
   test('pictures from the web in replies load only when clicked', async () => {

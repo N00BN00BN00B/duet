@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import type {
   AccessMode,
@@ -14,6 +14,7 @@ import { unifiedDiff } from '@shared/diff'
 import { displayPath } from '@shared/paths'
 import { homedir } from 'node:os'
 import { LineSplitter, TailBuffer } from '../../util/lines'
+import { saveToolImage } from '../../util/toolImages'
 import { binaryVersion } from '../../env'
 import { NativeSessionLostError, type Emit, type ProviderAdapter, type TurnRequest } from '../types'
 import { ClaudeMapper, claudeRateWindows } from './mapper'
@@ -310,16 +311,7 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   constructor(private readonly deps: ClaudeDeps) {}
 
-  private saveImage = (data: string, mediaType: string): string | null => {
-    try {
-      const ext = mediaType.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
-      const path = join(this.deps.attachmentsDir, `tool-${randomUUID()}.${ext}`)
-      writeFileSync(path, Buffer.from(data, 'base64'))
-      return path
-    } catch {
-      return null
-    }
-  }
+  private saveImage = (data: string, mediaType: string): string | null => saveToolImage(this.deps.attachmentsDir, data, mediaType)
 
   private spawnSession(req: TurnRequest, emit: Emit): ClaudeSession {
     const bin = this.deps.binary()

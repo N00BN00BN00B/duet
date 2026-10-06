@@ -77,7 +77,7 @@ describe('Codex item mapping', () => {
   })
 
   it('maps MCP calls, images, user messages and notices', () => {
-    expect(codexItemToTimeline({ type: 'mcpToolCall', id: 'm1', server: 'figma', tool: 'get_file', arguments: { id: 1 }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }, { type: 'image' }] } }, ctx)).toMatchObject({ tool: 'mcp', title: 'get_file', detail: 'figma', output: 'ok\n[image]', status: 'done' })
+    expect(codexItemToTimeline({ type: 'mcpToolCall', id: 'm1', server: 'figma', tool: 'get_file', arguments: { id: 1 }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }, { type: 'image' }] } }, ctx)).toMatchObject({ tool: 'mcp', title: 'get_file', detail: 'figma', output: 'ok\n[image]', status: 'done' }) // nowhere to save it: placeholder stays
     expect(codexItemToTimeline({ type: 'mcpToolCall', id: 'm2', server: 's', tool: 't', status: 'failed', error: { message: 'boom' } }, ctx)).toMatchObject({ status: 'error', output: 'boom' })
     expect(codexItemToTimeline({ type: 'imageGeneration', id: 'g', status: 'completed', result: '', revisedPrompt: 'a cat', savedPath: '/tmp/cat.png' }, ctx)).toMatchObject({ tool: 'image', images: ['/tmp/cat.png'], detail: 'a cat' })
     expect(codexItemToTimeline({ type: 'userMessage', id: 'u', content: [{ type: 'text', text: 'hi' }, { type: 'localImage', path: '/tmp/a.png' }] }, ctx)).toMatchObject({ kind: 'user', text: 'hi', attachments: [{ path: '/tmp/a.png' }] })

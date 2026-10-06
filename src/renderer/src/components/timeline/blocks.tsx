@@ -1,37 +1,15 @@
-import { memo, useMemo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ApprovalItem, AssistantItem, NoticeItem, PlanStep, ReasoningItem, SwitchItem, ToolItem, TurnItem, UserItem } from '@shared/types'
 import { PROVIDER_LABEL } from '@shared/types'
 import { diffStats } from '@shared/diff'
 import { duet } from '@/lib/api'
 import { formatCost, formatDuration, formatTokens, shortModel } from '@/lib/format'
 import { useApp } from '@/state/store'
-import { summarize, type WorkEntry } from '@/lib/timeline'
+import { groupImages, summarize, type WorkEntry } from '@/lib/timeline'
 import { ProviderLogo } from '../brand'
 import { CopyButton, Markdown } from '../Markdown'
 import { DiffStat, DiffView } from '../DiffView'
-import {
-  IconArrowRight,
-  IconBot,
-  IconCheck,
-  IconChevronRight,
-  IconCode,
-  IconEye,
-  IconFile,
-  IconGlobe,
-  IconImage,
-  IconInfo,
-  IconListChecks,
-  IconPencil,
-  IconPlug,
-  IconSearch,
-  IconShield,
-  IconSparkle,
-  IconTerminal,
-  IconWarning,
-  IconWrench,
-  IconX,
-  Spinner
-} from '../icons'
+import { IconArrowRight, IconCheck, IconChevronRight, IconCode, IconFile, IconInfo, IconListChecks, IconShield, IconWarning, Spinner } from '../icons'
 
 // ---------- user ----------
 
@@ -111,49 +89,48 @@ export function AgentHeader({ provider, model }: { provider: AssistantItem['prov
 
 // ---------- work log ----------
 
-
-const TOOL_ICON: Record<ToolItem['tool'], (p: { size?: number; className?: string }) => ReactNode> = {
-  command: (p) => <IconTerminal {...p} />,
-  edit: (p) => <IconPencil {...p} />,
-  write: (p) => <IconFile {...p} />,
-  read: (p) => <IconEye {...p} />,
-  search: (p) => <IconSearch {...p} />,
-  mcp: (p) => <IconPlug {...p} />,
-  web: (p) => <IconGlobe {...p} />,
-  agent: (p) => <IconBot {...p} />,
-  todo: (p) => <IconListChecks {...p} />,
-  image: (p) => <IconImage {...p} />,
-  skill: (p) => <IconSparkle {...p} />,
-  other: (p) => <IconWrench {...p} />
-}
-
 function liveLabel(entries: WorkEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
     if (e.kind === 'reasoning' && e.streaming) return 'Thinking'
     if (e.kind === 'tool' && e.status === 'running') {
-      switch (e.tool) {
-        case 'command':
-          return `Running ${e.title}`
-        case 'read':
-          return `Reading ${e.title}`
-        case 'edit':
-        case 'write':
-          return `Editing ${e.title}`
-        case 'search':
-          return `Searching ${e.title}`
-        case 'web':
-          return `Browsing ${e.title}`
-        case 'mcp':
-          return `Calling ${e.detail ? `${e.detail} › ` : ''}${e.title}`
-        case 'agent':
-          return `Subagent: ${e.title}`
-        default:
-          return e.title
-      }
+      const { verb, subject } = describeRow(e)
+      return [verb, subject].filter(Boolean).join(' ')
     }
   }
   return null
+}
+
+/** How a tool reads in the work log: "Ran npm test", "Edited src/app.ts", "Called take_screenshot". */
+function describeRow(item: ToolItem): { verb: string; subject: string; extra?: string; mono: boolean } {
+  const running = item.status === 'running'
+  const pick = (now: string, done: string) => (running ? now : done)
+  switch (item.tool) {
+    case 'command':
+      return { verb: pick('Running', 'Ran'), subject: item.title, mono: true }
+    case 'read':
+      return item.detail === 'List directory' ? { verb: pick('Listing', 'Listed'), subject: item.title, mono: true } : { verb: pick('Reading', 'Read'), subject: item.title, extra: item.detail, mono: true }
+    case 'edit':
+      return { verb: pick('Editing', 'Edited'), subject: item.title, extra: item.detail, mono: true }
+    case 'write':
+      return { verb: pick('Writing', 'Wrote'), subject: item.title, mono: true }
+    case 'search':
+      return { verb: pick('Searching for', 'Searched for'), subject: item.title, extra: item.detail, mono: true }
+    case 'web':
+      return /^https?:\/\//i.test(item.title) ? { verb: pick('Fetching', 'Fetched'), subject: item.title, mono: false } : { verb: pick('Searching the web for', 'Searched the web for'), subject: item.title, mono: false }
+    case 'mcp':
+      return { verb: pick('Calling', 'Called'), subject: item.title, extra: item.detail, mono: false }
+    case 'agent':
+      return { verb: pick('Subagent working on', 'Subagent'), subject: item.title, extra: item.detail, mono: false }
+    case 'todo':
+      return { verb: item.title === 'Proposed plan' ? 'Proposed a plan' : 'Updated the plan', subject: '', extra: item.detail, mono: false }
+    case 'image':
+      return item.name === 'imageGeneration' ? { verb: pick('Generating an image', 'Generated an image'), subject: '', extra: item.detail, mono: false } : { verb: pick('Looking at', 'Looked at'), subject: item.title, mono: true }
+    case 'skill':
+      return { verb: pick('Using skill', 'Used skill'), subject: item.title, mono: false }
+    default:
+      return { verb: '', subject: item.title, extra: item.detail, mono: false }
+  }
 }
 
 export const WorkGroup = memo(function WorkGroup({ entries, live, defaultOpen }: { entries: WorkEntry[]; live: boolean; defaultOpen: boolean }) {
@@ -163,6 +140,8 @@ export const WorkGroup = memo(function WorkGroup({ entries, live, defaultOpen }:
   const label = running ? liveLabel(entries) : null
   const failed = entries.some((e) => e.kind === 'tool' && e.status === 'error')
   const latestPlan = [...entries].reverse().find((e): e is ToolItem => e.kind === 'tool' && e.tool === 'todo' && !!e.steps?.length)
+  const images = useMemo(() => groupImages(entries), [entries])
+  const onlyThoughts = entries.every((e) => e.kind === 'reasoning')
   const changed = useMemo(() => {
     let additions = 0
     let deletions = 0
@@ -176,27 +155,64 @@ export const WorkGroup = memo(function WorkGroup({ entries, live, defaultOpen }:
     return { additions, deletions }
   }, [entries])
   return (
-    <div className="anim-fade">
-      <button type="button" onClick={() => setOpen(!isOpen)} aria-expanded={isOpen} className="press group/wl flex w-full items-center gap-2 rounded-lg py-1 text-left text-[12.5px] text-fg-2 hover:text-fg">
-        <span className="flex h-5 w-5 items-center justify-center text-fg-3">{running ? <Spinner size={13} className="text-accent" /> : <IconChevronRight size={13} className={`transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`} />}</span>
+    <div className="anim-fade" data-testid="work-group">
+      <button
+        type="button"
+        onClick={() => setOpen(!isOpen)}
+        aria-expanded={isOpen}
+        className="press group/wl inline-flex max-w-full items-center gap-1.5 rounded-md py-0.5 text-left text-[13px] text-fg-2 outline-none hover:text-fg focus-visible:text-fg focus-visible:underline focus-visible:decoration-fg-3/50 focus-visible:underline-offset-4"
+      >
+        {running && <Spinner size={12} className="shrink-0 text-accent" />}
         <span className={`min-w-0 truncate ${running ? 'shimmer-text' : ''}`}>{label ?? summarize(entries)}</span>
         {!running && (changed.additions > 0 || changed.deletions > 0) && <DiffStat additions={changed.additions} deletions={changed.deletions} />}
-        {!running && failed && <IconWarning size={13} className="text-warn" />}
+        {!running && failed && <span className="shrink-0 text-[11.5px] text-bad">· failed</span>}
+        <IconChevronRight size={12} className={`shrink-0 text-fg-3 transition-transform duration-200 group-hover/wl:text-fg-2 ${isOpen ? 'rotate-90' : ''}`} />
       </button>
-      {latestPlan && !isOpen && <PlanSteps steps={latestPlan.steps!} className="ml-7 mt-1" />}
-      {isOpen && (
-        <div className="anim-fade ml-[9px] mt-1 border-l border-line pl-4">
-          {entries.map((e) => (e.kind === 'reasoning' ? <ReasoningRow key={e.id} item={e} /> : <ToolRow key={e.id} item={e} />))}
-        </div>
-      )}
+      {latestPlan && !isOpen && <PlanSteps steps={latestPlan.steps!} className="mt-2" />}
+      {isOpen &&
+        (onlyThoughts ? (
+          // Just thinking: open straight into the thoughts rather than a row that says "Thought" again.
+          <div className="anim-fade mt-1.5 space-y-2 rounded-[10px] border border-line px-3 py-2" data-testid="work-log">
+            {entries.map((e) => (e.kind === 'reasoning' ? <Markdown key={e.id} text={e.text} streaming={e.streaming} className="text-[0.92em] !text-fg-2" /> : null))}
+          </div>
+        ) : (
+          <div className="anim-fade mt-1.5 overflow-hidden rounded-[10px] border border-line" data-testid="work-log">
+            {entries.map((e, i) => (
+              <div key={e.id} className={i > 0 ? 'border-t border-line' : ''}>
+                {e.kind === 'reasoning' ? <ReasoningRow item={e} /> : <ToolRow item={e} />}
+              </div>
+            ))}
+          </div>
+        ))}
+      {images.length > 0 && <ToolImages paths={images} />}
     </div>
   )
 })
 
+/** Screenshots and other pictures from tools, shown right in the conversation. */
+function ToolImages({ paths }: { paths: string[] }) {
+  const single = paths.length === 1
+  return (
+    <div className="mt-2 flex flex-wrap gap-2" data-testid="tool-images">
+      {paths.map((p) => (
+        <button
+          key={p}
+          type="button"
+          onClick={() => useApp.setState({ lightbox: p })}
+          title="Open full size"
+          className="press overflow-hidden rounded-xl border border-line bg-surface-2 transition-[border-color] hover:border-line-strong"
+        >
+          <img src={duet.util.fileUrl(p)} alt="Picture from a tool" loading="lazy" draggable={false} className={single ? 'block max-h-[360px] w-auto max-w-full object-contain' : 'block h-36 w-auto max-w-[260px] object-cover'} />
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function PlanSteps({ steps, className = '' }: { steps: PlanStep[]; className?: string }) {
   const done = steps.filter((s) => s.status === 'done').length
   return (
-    <div className={`rounded-xl border border-line bg-surface/60 px-3 py-2 ${className}`}>
+    <div className={`rounded-[10px] border border-line px-3 py-2 ${className}`}>
       <div className="mb-1 flex items-center justify-between text-[11.5px] text-fg-3">
         <span className="flex items-center gap-1.5">
           <IconListChecks size={13} /> Plan
@@ -227,92 +243,113 @@ export function PlanSteps({ steps, className = '' }: { steps: PlanStep[]; classN
   )
 }
 
+const rowClass = 'flex w-full min-w-0 items-center gap-2 px-3 py-[7px] text-left text-[12.5px] outline-none'
+const pressableRow = `${rowClass} hover:bg-hover/50 focus-visible:bg-hover`
+
+/** First line of a thought, without markdown, as a hint of what it was about. */
+function thoughtTitle(text: string): string {
+  const line = text.trim().split('\n').find((l) => l.trim()) ?? ''
+  return line.replace(/[*_`#>]/g, '').trim()
+}
+
 const ReasoningRow = memo(function ReasoningRow({ item }: { item: ReasoningItem }) {
   const [open, setOpen] = useState(false)
+  const title = item.streaming ? '' : thoughtTitle(item.text)
   return (
-    <div className="py-0.5">
-      <button type="button" onClick={() => setOpen((v) => !v)} className="press flex w-full items-center gap-2 rounded-md py-0.5 text-left text-[12.5px] text-fg-3 hover:text-fg-2">
-        <IconSparkle size={13} />
-        <span className={item.streaming ? 'shimmer-text' : ''}>{item.streaming ? 'Thinking…' : 'Thought'}</span>
-        <IconChevronRight size={12} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
+    <div>
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className={pressableRow}>
+        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+          <span className={`shrink-0 text-fg-3 ${item.streaming ? 'shimmer-text' : ''}`}>{item.streaming ? 'Thinking…' : 'Thought'}</span>{' '}
+          {title && <span className="min-w-0 truncate text-fg-2">{title}</span>}
+        </span>
+        <IconChevronRight size={12} className={`shrink-0 text-fg-3 transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
       </button>
-      {open && <Markdown text={item.text} className="mb-1 mt-1 text-[0.92em] !text-fg-2" />}
+      {open && (
+        <div className="border-t border-line bg-[var(--code-bg)] px-3 py-2">
+          <Markdown text={item.text} className="text-[0.92em] !text-fg-2" />
+        </div>
+      )}
     </div>
   )
 })
 
-function statusIcon(item: ToolItem): ReactNode {
-  if (item.status === 'running') return <Spinner size={12} className="text-accent" />
-  if (item.status === 'error') return <IconX size={12} className="text-bad" />
-  if (item.status === 'declined') return <span className="text-[10.5px] text-warn">declined</span>
-  return null
-}
-
 export const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const [open, setOpen] = useState(false)
-  const hasDetails = !!(item.output || item.diff || item.input || item.images?.length || item.steps?.length)
+  const hasDetails = !!(item.output || item.diff || hasInput(item) || item.steps?.length || (item.tool === 'command' && item.detail))
   const stats = item.diff && (item.tool === 'edit' || item.tool === 'write') ? diffStats(item.diff) : null
-  const mono = item.tool === 'command' || item.tool === 'read' || item.tool === 'edit' || item.tool === 'write' || item.tool === 'search'
+  const { verb, subject, extra, mono } = describeRow(item)
+  const declined = item.status === 'declined'
+  const failed = item.status === 'error'
+  const content = (
+    <>
+      <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+        {/* Real spaces between the parts, so it reads and copies as a sentence. */}
+        {verb && <span className="shrink-0 text-fg-3">{verb}</span>}{' '}
+        {subject && <span className={`min-w-0 truncate text-fg-2 ${mono ? 'font-mono text-[11.5px]' : ''} ${declined ? 'line-through decoration-fg-3/50' : ''}`}>{subject}</span>}{' '}
+        {extra && <span className="min-w-0 shrink truncate text-[12px] text-fg-3">{extra}</span>}
+      </span>
+      {stats && <DiffStat additions={stats.additions} deletions={stats.deletions} />}
+      <span className="flex shrink-0 items-center gap-2 text-[11.5px] text-fg-3 tabular-nums">
+        {typeof item.exitCode === 'number' && item.exitCode !== 0 ? <span className="text-bad">exit {item.exitCode}</span> : failed ? <span className="text-bad">failed</span> : null}
+        {declined && <span>declined</span>}
+        {item.durationMs !== undefined && item.status !== 'running' && item.durationMs > 900 && <span>{formatDuration(item.durationMs)}</span>}
+        {item.status === 'running' ? (
+          <Spinner size={11} className="text-accent" />
+        ) : hasDetails ? (
+          <IconChevronRight size={12} className={`transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
+        ) : null}
+      </span>
+    </>
+  )
   return (
-    <div className="py-[1px]">
-      <button
-        type="button"
-        onClick={() => hasDetails && setOpen((v) => !v)}
-        className={`press flex w-full min-w-0 items-center gap-2 rounded-md py-[3px] text-left text-[12.5px] ${hasDetails ? 'hover:text-fg' : ''} text-fg-2`}
-      >
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center text-fg-3">{TOOL_ICON[item.tool]({ size: 13 })}</span>
-        <span className={`min-w-0 truncate ${mono ? 'font-mono text-[11.5px]' : ''} ${item.status === 'declined' ? 'line-through decoration-fg-3/50' : ''}`}>{item.title}</span>
-        {item.detail && item.tool !== 'command' && <span className="min-w-0 shrink truncate text-[11.5px] text-fg-3">{item.detail}</span>}
-        {stats && <DiffStat additions={stats.additions} deletions={stats.deletions} />}
-        <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-[11px] text-fg-3">
-          {typeof item.exitCode === 'number' && item.exitCode !== 0 && <span className="text-bad">exit {item.exitCode}</span>}
-          {item.durationMs !== undefined && item.status !== 'running' && item.durationMs > 900 && <span className="tabular-nums">{formatDuration(item.durationMs)}</span>}
-          {statusIcon(item)}
-        </span>
-      </button>
+    <div data-testid="tool-row">
+      {hasDetails ? (
+        <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className={pressableRow}>
+          {content}
+        </button>
+      ) : (
+        <div className={rowClass}>{content}</div>
+      )}
       {open && <ToolDetails item={item} />}
     </div>
   )
 })
 
+function hasInput(item: ToolItem): boolean {
+  return toolInputText(item) !== ''
+}
+
+function toolInputText(item: ToolItem): string {
+  if (item.input === undefined || item.tool === 'edit' || item.tool === 'write' || item.tool === 'todo') return ''
+  if (item.tool === 'command') {
+    const cmd = (item.input as { command?: string })?.command
+    return typeof cmd === 'string' ? cmd : ''
+  }
+  try {
+    const s = JSON.stringify(item.input, null, 2)
+    return s === '{}' ? '' : s
+  } catch {
+    return ''
+  }
+}
+
 function ToolDetails({ item }: { item: ToolItem }) {
-  const inputText = useMemo(() => {
-    if (item.input === undefined || item.tool === 'edit' || item.tool === 'write' || item.tool === 'todo') return ''
-    if (item.tool === 'command') {
-      const cmd = (item.input as { command?: string })?.command
-      return typeof cmd === 'string' ? cmd : ''
-    }
-    try {
-      const s = JSON.stringify(item.input, null, 2)
-      return s === '{}' ? '' : s
-    } catch {
-      return ''
-    }
-  }, [item.input, item.tool])
+  const inputText = useMemo(() => toolInputText(item), [item])
   return (
-    <div className="anim-fade mb-2 ml-6 mt-1 overflow-hidden rounded-lg border border-line bg-[var(--code-bg)]">
+    <div className="anim-fade divide-y divide-line border-t border-line bg-[var(--code-bg)]">
       {item.steps?.length ? <PlanSteps steps={item.steps} className="m-2" /> : null}
-      {item.detail && item.tool === 'command' && <div className="border-b border-line px-3 py-1.5 text-[11.5px] text-fg-3">{item.detail}</div>}
+      {item.detail && item.tool === 'command' && <div className="px-3 py-1.5 text-[11.5px] text-fg-3">{item.detail}</div>}
       {inputText && (
-        <pre className="selectable max-h-48 overflow-auto border-b border-line px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg-2">
+        <pre className="selectable max-h-48 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg-2">
           {item.tool === 'command' ? <span className="text-fg-3">$ </span> : null}
           {inputText}
         </pre>
       )}
       {item.diff && <DiffView diff={item.diff} headers={item.tool !== 'edit' || (item.diff.match(/^\+\+\+ /gm)?.length ?? 0) > 1} className="max-h-96 overflow-auto" />}
-      {item.images?.length ? (
-        <div className="flex flex-wrap gap-2 p-2">
-          {item.images.map((p) => (
-            <button key={p} type="button" onClick={() => useApp.setState({ lightbox: p })} className="press overflow-hidden rounded-lg border border-line">
-              <img src={duet.util.fileUrl(p)} alt="" className="h-28 max-w-[240px] object-cover" />
-            </button>
-          ))}
-        </div>
-      ) : null}
       {item.output && (
-        <div className="relative">
-          <pre className="selectable max-h-80 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg-2 whitespace-pre-wrap break-words">{item.output}</pre>
-          <div className="absolute right-1 top-1">
+        <div className="group/out relative">
+          <pre className="selectable max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg-2">{item.output}</pre>
+          <div className="absolute right-1 top-1 opacity-0 transition-opacity group-hover/out:opacity-100">
             <CopyButton text={item.output} />
           </div>
         </div>

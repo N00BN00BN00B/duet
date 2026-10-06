@@ -1,7 +1,9 @@
 import type { ApprovalDecision, ProviderId, ProviderStatus, SlashCommand, ToolItem } from '@shared/types'
 import { PROVIDER_LABEL, otherProvider } from '@shared/types'
 import { unifiedDiff } from '@shared/diff'
+import { deflateSync } from 'node:zlib'
 import type { Emit, ProviderAdapter, TurnRequest } from '../types'
+import { saveToolImage } from '../../util/toolImages'
 
 interface Run {
   nativeId: string
@@ -24,7 +26,9 @@ export class FakeAdapter implements ProviderAdapter {
 
   constructor(
     readonly id: ProviderId,
-    private readonly speed = Number(process.env.DUET_FAKE_SPEED ?? '1')
+    private readonly speed = Number(process.env.DUET_FAKE_SPEED ?? '1'),
+    /** Where the demo "screenshot" tool saves its picture. */
+    private readonly attachmentsDir?: string
   ) {}
 
   async status(): Promise<ProviderStatus> {
@@ -89,6 +93,16 @@ export class FakeAdapter implements ProviderAdapter {
     await this.sleep(run, 250)
     if (run.interrupted) return
     emit({ type: 'item', item: { kind: 'reasoning', id: `${turn}-think`, ts: Date.now(), provider: this.id, text: 'Reading the request and planning a short answer.', streaming: false } })
+
+    if (/\bscreenshot\b/i.test(userText)) {
+      // Like an MCP tool (Rogold, Playwright…) that returns a picture.
+      const shot: ToolItem = { kind: 'tool', id: `${turn}-shot`, ts: Date.now(), provider: this.id, tool: 'mcp', name: 'mcp__demo-browser__take_screenshot', title: 'take_screenshot', detail: 'demo-browser', input: { fullPage: false }, status: 'running' }
+      emit({ type: 'item', item: shot })
+      await this.sleep(run, 300)
+      if (run.interrupted) return
+      const image = this.attachmentsDir ? saveToolImage(this.attachmentsDir, demoScreenshot().toString('base64'), 'image/png') : null
+      emit({ type: 'item', item: { ...shot, status: 'done', durationMs: 1300, output: '{\n  "width": 96,\n  "height": 60\n}', images: image ? [image] : undefined } })
+    }
 
     const lines: string[] = []
     if (handoffMatch) lines.push(`Picking up from ${PROVIDER_LABEL[otherProvider(this.id)]} — I can see the earlier conversation (${priorMessages} entries).`)
@@ -220,4 +234,50 @@ export class FakeAdapter implements ProviderAdapter {
   async shutdown(): Promise<void> {
     for (const id of [...this.runs.keys()]) await this.interrupt(id)
   }
+}
+
+/** A small made-up app window (title bar, sidebar, gradient), drawn as a PNG. */
+function demoScreenshot(): Buffer {
+  const width = 96
+  const height = 60
+  const rows: Buffer[] = []
+  for (let y = 0; y < height; y++) {
+    const row = Buffer.alloc(1 + width * 3)
+    for (let x = 0; x < width; x++) {
+      let c: [number, number, number]
+      if (y < 10) c = [38, 38, 46]
+      else if (x < 22) c = [28, 28, 34]
+      else {
+        const t = (x - 22) / (width - 22)
+        c = [Math.round(124 + 93 * t), Math.round(140 - 21 * t), Math.round(255 - 168 * t)]
+        if (y > 24 && y < 30 && x > 30 && x < 80) c = [240, 240, 245]
+        if (y > 36 && y < 40 && x > 30 && x < 64) c = [200, 200, 210]
+      }
+      row.set(c, 1 + x * 3)
+    }
+    rows.push(row)
+  }
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    return c >>> 0
+  })
+  const crc = (buf: Buffer) => {
+    let c = 0xffffffff
+    for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8)
+    return (c ^ 0xffffffff) >>> 0
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const head = Buffer.alloc(4)
+    head.writeUInt32BE(data.length)
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+    const tail = Buffer.alloc(4)
+    tail.writeUInt32BE(crc(body))
+    return Buffer.concat([head, body, tail])
+  }
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header.set([8, 2, 0, 0, 0], 8)
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))])
 }

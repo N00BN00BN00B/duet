@@ -43,11 +43,17 @@ export function Timeline({ meta, items }: { meta: ThreadMeta; items: TimelineIte
     return () => ro.disconnect()
   }, [scrollToBottom])
 
+  const lastTop = useRef(0)
   const onScroll = () => {
     const el = scrollRef.current
     if (!el) return
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-    stick.current = distance < 80
+    const movedUp = el.scrollTop < lastTop.current - 1
+    lastTop.current = el.scrollTop
+    // Only the reader scrolling up stops the follow; content that grows in the meantime (a
+    // picture finishing loading) must not.
+    if (distance < 80) stick.current = true
+    else if (movedUp) stick.current = false
     setShowJump(distance > 400)
   }
 

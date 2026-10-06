@@ -2,6 +2,7 @@ import type { AssistantItem, Attachment, ItemStatus, PlanStep, RateWindow, Reaso
 import { unifiedDiff } from '@shared/diff'
 import { basename, displayPath, firstLine, truncate } from '@shared/paths'
 import type { Emit } from '../types'
+import { parseImageDataUrl } from '../../util/toolImages'
 
 /** Upper bound for command output a mapper keeps in memory while it streams. */
 const MAX_TRACKED_OUTPUT = 256 * 1024
@@ -84,12 +85,36 @@ export function planSteps(plan: Json): PlanStep[] {
   }))
 }
 
-function mcpResultText(result: Json): string {
-  if (!result || !Array.isArray(result.content)) return ''
-  return result.content
-    .map((c: Json) => (c?.type === 'text' && typeof c.text === 'string' ? c.text : c?.type ? `[${c.type}]` : ''))
-    .filter(Boolean)
-    .join('\n')
+function isImageMime(mime: unknown): boolean {
+  return typeof mime === 'string' && mime.toLowerCase().startsWith('image/')
+}
+
+/**
+ * Splits an MCP result into its text and its pictures (saved to disk so they show in the
+ * conversation). A picture that can't be saved stays visible as "[image]".
+ */
+function mcpResult(result: Json, save: CodexItemContext['saveImage']): { text: string; images: string[] } {
+  const text: string[] = []
+  const images: string[] = []
+  if (!result || !Array.isArray(result.content)) return { text: '', images }
+  for (const c of result.content) {
+    if (c?.type === 'text' && typeof c.text === 'string') {
+      text.push(c.text)
+      continue
+    }
+    const picture =
+      c?.type === 'image' && typeof c.data === 'string'
+        ? { data: c.data, mime: c.mimeType ?? 'image/png' }
+        : c?.type === 'resource' && isImageMime(c.resource?.mimeType) && typeof c.resource?.blob === 'string'
+          ? { data: c.resource.blob, mime: c.resource.mimeType }
+          : null
+    const saved = picture && save ? save(picture.data, picture.mime) : null
+    if (saved) {
+      if (!images.includes(saved)) images.push(saved)
+    } else if (c?.type === 'resource_link' && typeof c.uri === 'string') text.push(`[${c.name ?? 'resource'}: ${c.uri}]`)
+    else if (c?.type) text.push(`[${c.type}]`)
+  }
+  return { text: text.join('\n'), images }
 }
 
 export interface CodexItemContext {
@@ -97,6 +122,8 @@ export interface CodexItemContext {
   home?: string
   now: () => number
   model?: string
+  /** Stores a base64 picture a tool returned and gives back its path. */
+  saveImage?: (base64: string, mediaType: string) => string | null
 }
 
 /** Converts a Codex `ThreadItem` into a Duet timeline item (or null for items Duet doesn't show). */
@@ -201,10 +228,12 @@ export function codexItemToTimeline(item: Json, ctx: CodexItemContext, ts?: numb
         title: String(item.tool ?? 'tool'),
         detail: String(item.server ?? ''),
         input: item.arguments,
-        output: item.error?.message ?? mcpResultText(item.result),
         status: item.error ? 'error' : mapStatus(item.status),
         durationMs: typeof item.durationMs === 'number' ? item.durationMs : undefined
       }
+      const { text, images } = mcpResult(item.result, ctx.saveImage)
+      toolItem.output = item.error?.message ?? text
+      if (images.length) toolItem.images = images
       return toolItem
     }
     case 'dynamicToolCall': {
@@ -220,6 +249,15 @@ export function codexItemToTimeline(item: Json, ctx: CodexItemContext, ts?: numb
         input: item.arguments,
         status: item.success === false ? 'error' : mapStatus(item.status)
       }
+      const content: Json[] = Array.isArray(item.contentItems) ? item.contentItems : []
+      const text = content.filter((c) => c?.type === 'inputText' && typeof c.text === 'string').map((c) => c.text).join('\n')
+      if (text) toolItem.output = text
+      // Only inline data is kept: a picture on the web is never fetched behind the user's back.
+      const images = content
+        .map((c) => (c?.type === 'inputImage' && ctx.saveImage ? parseImageDataUrl(c.imageUrl) : null))
+        .map((img) => (img ? ctx.saveImage!(img.data, img.mediaType) : null))
+        .filter((p): p is string => !!p)
+      if (images.length) toolItem.images = [...new Set(images)]
       return toolItem
     }
     case 'webSearch': {

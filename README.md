@@ -20,7 +20,8 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 - One model picker for both agents (switching models across agents switches the agent), reasoning effort, and four permission modes: **Plan**, **Ask**, **Auto-edit**, **Full access**.
 
 **A great place to work with agents**
-- Streaming markdown with syntax highlighting, collapsible "work logs" for tool calls (commands with live output, file edits as diffs, reads, searches, MCP calls, subagents), live plans/to-dos.
+- Streaming markdown with syntax highlighting, and Claude Code-style work logs: one plain line per step ("Ran `npm test`", "Edited `src/app.ts` +3 −1", "Called `take_screenshot`") that opens into commands with live output, diffs, MCP calls and subagents, plus live plans/to-dos.
+- Screenshots and other pictures that tools return (MCP screenshot tools, image viewers, generated images) show right in the conversation — click one for full size.
 - Approvals docked above the composer: run/deny commands, review diffs before edits, approve plans, answer agent questions. <kbd>⌘↵</kbd> allow · <kbd>⇧⌘↵</kbd> always allow · <kbd>Esc</kbd> stop.
 - Images: paste, drag & drop or attach; both agents see them.
 - `/` slash commands and `@` file mentions in the composer.
@@ -46,7 +47,7 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 | ![Thread](docs/screenshots/thread.png) | ![Approval](docs/screenshots/approval.png) |
 | ![Panels: browser, changes, terminal](docs/screenshots/panels.png) | ![Light theme](docs/screenshots/light.png) |
 | ![MCP servers](docs/screenshots/mcp.png) | ![Sync](docs/screenshots/sync.png) |
-| ![Backups](docs/screenshots/backups.png) | |
+| ![Backups](docs/screenshots/backups.png) | ![Screenshots from tools show in the chat](docs/screenshots/tool-screenshot.png) |
 
 ## Requirements
 
