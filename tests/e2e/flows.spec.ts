@@ -185,6 +185,34 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await expect(page.getByTestId('right-panel')).toBeHidden()
   })
 
+  test('browser: pick an element and attach a screenshot to the message', async () => {
+    const { page } = ctx
+    await page.getByTestId('toggle-browser').click()
+    await expect(page.getByTestId('browser-panel')).toBeVisible()
+    const html = '<body style="margin:0;font-family:sans-serif;background:white"><button id="buy" style="position:absolute;left:40px;top:40px;width:220px;height:64px;font-size:20px">Buy now</button></body>'
+    await page.getByTestId('browser-url').fill(`data:text/html,${html}`)
+    await page.getByTestId('browser-url').press('Enter')
+    await page.waitForTimeout(1200)
+    await page.getByTestId('browser-pick').click()
+    await page.waitForTimeout(700)
+    const box = (await page.locator('webview').boundingBox())!
+    await page.mouse.move(box.x + 120, box.y + 70)
+    await page.waitForTimeout(150)
+    await page.mouse.click(box.x + 150, box.y + 72)
+    await expect(page.getByText('Element added to your message')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('composer-input')).toHaveValue(/Selected element on data:text\/html/)
+    await expect(page.getByTestId('composer-input')).toHaveValue(/<button id="buy"/)
+    await expect(page.getByTestId('composer').locator('img')).toHaveCount(1)
+    await page.getByTestId('browser-screenshot').click()
+    await expect(page.getByTestId('composer').locator('img')).toHaveCount(2, { timeout: 10_000 })
+    // Clear the draft for the following tests.
+    await page.getByTestId('composer-input').fill('')
+    const removeButtons = page.getByRole('button', { name: /^Remove / })
+    while ((await removeButtons.count()) > 0) await removeButtons.first().click({ force: true })
+    await expect(page.getByTestId('composer').locator('img')).toHaveCount(0)
+    await page.getByTestId('toggle-browser').click()
+  })
+
   test('command palette opens threads and actions', async () => {
     const { page } = ctx
     await page.keyboard.press('Meta+k')

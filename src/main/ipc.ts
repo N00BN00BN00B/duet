@@ -1,5 +1,6 @@
 import { ipcMain, type WebContents } from 'electron'
 import { API_CHANNELS } from '@shared/api'
+import { logLine } from './logger'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Handler = (...args: any[]) => unknown
@@ -22,7 +23,7 @@ export function registerIpc(handlers: HandlerMap, isTrusted: (sender: WebContent
           return await fn(...args)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          console.error(`[ipc] ${channel} failed:`, message)
+          logLine('warn', `[ipc] ${channel} failed:`, message)
           throw new Error(message)
         }
       })

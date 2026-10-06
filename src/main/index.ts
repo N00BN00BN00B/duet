@@ -26,6 +26,7 @@ import { listMcp, mergeStatus, parseMcpJson, removeClaudeServer, removeCodexServ
 import { applySync, scanSync } from './features/sync'
 import { createBackup, defaultContext, describeSets, listBackups, restoreBackup } from './features/backup'
 import { fakeMcpDeps } from './features/fakeMcp'
+import { initLogger, logLine } from './logger'
 
 protocol.registerSchemesAsPrivileged([{ scheme: FILE_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
@@ -33,8 +34,13 @@ const FAKE = process.env.DUET_FAKE_PROVIDERS === '1'
 if (process.env.DUET_USER_DATA) app.setPath('userData', resolve(process.env.DUET_USER_DATA))
 
 const log = (...args: unknown[]) => {
+  logLine('info', ...args)
   if (!app.isPackaged || process.env.DUET_DEBUG) console.log(...args)
 }
+
+// Never show Electron's crash dialog for a stray background error; record it instead.
+process.on('uncaughtException', (error) => logLine('error', 'uncaughtException', error))
+process.on('unhandledRejection', (reason) => logLine('error', 'unhandledRejection', reason))
 
 let mainWindow: BrowserWindow | null = null
 let store: Store
@@ -100,7 +106,10 @@ function createWindow(): void {
   mainWindow = win
   if (state.maximized) win.maximize()
   win.once('ready-to-show', () => {
-    if (process.env.DUET_HIDDEN !== '1') win.show()
+    if (process.env.DUET_HIDDEN === '1') return
+    // Automated test runs show the window without stealing keyboard focus from the user.
+    if (process.env.DUET_E2E === '1') win.showInactive()
+    else win.show()
   })
   win.on('close', () => saveWindowState(win))
   win.on('closed', () => {
@@ -602,6 +611,8 @@ function buildMenu(): void {
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.tif', '.tiff', '.ico', '.avif'])
 
 async function bootstrap(): Promise<void> {
+  initLogger(app.getPath('userData'))
+  logLine('info', `Duet ${app.getVersion()} starting${FAKE ? ' (demo agents)' : ''}`)
   await loadShellEnv()
   store = new Store(app.getPath('userData'))
   nativeTheme.themeSource = store.settings.theme

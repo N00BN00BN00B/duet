@@ -25,7 +25,7 @@ export async function launchDuet(opts: { onboarded?: boolean; theme?: 'dark' | '
     writeFileSync(join(project, 'README.md'), '# Demo app\n')
     writeFileSync(
       join(userData, 'settings.json'),
-      JSON.stringify({ onboarded: opts.onboarded ?? true, theme: opts.theme ?? 'dark', projects: [project], backupDir: join(home, 'Duet Backups') })
+      JSON.stringify({ onboarded: opts.onboarded ?? true, theme: opts.theme ?? 'dark', projects: [project], backupDir: join(home, 'Duet Backups'), notifications: false })
     )
     opts.seed?.(home)
   }
@@ -37,6 +37,7 @@ export async function launchDuet(opts: { onboarded?: boolean; theme?: 'dark' | '
       ...process.env,
       HOME: home,
       DUET_FAKE_PROVIDERS: '1',
+      DUET_E2E: '1',
       DUET_FAKE_SPEED: '3',
       DUET_USER_DATA: userData,
       ELECTRON_ENABLE_LOGGING: '0'
