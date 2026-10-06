@@ -1,0 +1,57 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
+import type { McpWriteDeps } from './mcp'
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Json = any
+
+/**
+ * File-based stand-ins for `claude mcp …` and Codex `config/batchWrite`, used in demo/test
+ * mode so automated runs never touch a real installation.
+ */
+export function fakeMcpDeps(home: string): McpWriteDeps {
+  const claudeJson = join(home, '.claude.json')
+  const codexToml = join(home, '.codex', 'config.toml')
+  const readJson = (): Json => (existsSync(claudeJson) ? JSON.parse(readFileSync(claudeJson, 'utf8')) : {})
+  const readToml = (): Json => (existsSync(codexToml) ? parseToml(readFileSync(codexToml, 'utf8')) : {})
+  return {
+    claude: async (args) => {
+      const data = readJson()
+      data.mcpServers ??= {}
+      if (args[0] === 'mcp' && args[1] === 'add-json') {
+        data.mcpServers[args[2]] = JSON.parse(args[3])
+      } else if (args[0] === 'mcp' && args[1] === 'remove') {
+        if (!data.mcpServers[args[2]]) return { stdout: '', stderr: `No MCP server named ${args[2]}`, code: 1 }
+        delete data.mcpServers[args[2]]
+      } else return { stdout: '', stderr: 'unsupported', code: 1 }
+      writeFileSync(claudeJson, JSON.stringify(data, null, 2))
+      return { stdout: 'ok', stderr: '', code: 0 }
+    },
+    codex: async (method, params) => {
+      if (method === 'config/mcpServer/reload') return {}
+      if (method !== 'config/batchWrite') throw new Error(`unsupported ${method}`)
+      const data = readToml()
+      for (const edit of params.edits as { keyPath: string; value: Json; mergeStrategy: string }[]) {
+        const parts = edit.keyPath.split('.')
+        let node = data
+        for (const part of parts.slice(0, -1)) {
+          if (edit.value === null && !node[part]) {
+            node = null
+            break
+          }
+          node[part] ??= {}
+          node = node[part]
+        }
+        if (!node) continue
+        const last = parts[parts.length - 1]
+        if (edit.value === null) delete node[last]
+        else if (edit.mergeStrategy === 'upsert' && typeof edit.value === 'object' && !Array.isArray(edit.value)) node[last] = { ...(node[last] ?? {}), ...edit.value }
+        else node[last] = edit.value
+      }
+      mkdirSync(dirname(codexToml), { recursive: true })
+      writeFileSync(codexToml, stringifyToml(data))
+      return { status: 'ok' }
+    }
+  }
+}

@@ -1,0 +1,40 @@
+appId: games.navojstudios.duet
+productName: Duet
+copyright: Copyright © 2026 N00BN00BN00B
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+asarUnpack:
+  - node_modules/node-pty/**
+npmRebuild: false
+afterPack: scripts/after-pack.cjs
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+  darkModeSupport: true
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  artifactName: Duet-${version}-${arch}-mac.${ext}
+  extendInfo:
+    NSHumanReadableCopyright: Copyright © 2026 N00BN00BN00B
+dmg:
+  title: Duet ${version}
+  artifactName: Duet-${version}-${arch}.${ext}
+  iconSize: 96
+  contents:
+    - x: 150
+      y: 190
+    - x: 390
+      y: 190
+      type: link
+      path: /Applications

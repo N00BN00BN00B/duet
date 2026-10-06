@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "composite": false
+  },
+  "include": [
+    "tests/**/*",
+    "src/shared/**/*",
+    "src/main/**/*"
+  ]
+}
