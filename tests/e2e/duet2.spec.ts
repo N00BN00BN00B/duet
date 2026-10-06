@@ -168,7 +168,11 @@ test.describe.serial('Duet 2: look, commands, sync, usage, command line', () => 
     const { page } = ctx
     /** Where stop `i` of `n` sits on a slider track (the knob's centre runs 14px in from each end). */
     const stopX = async (testId: string, i: number, n: number) => {
-      const box = (await page.getByTestId(testId).getByRole('slider').boundingBox())!
+      const track = page.getByTestId(testId).getByRole('slider')
+      await track.evaluate(async (el) => {
+        await Promise.all((el.closest('[role="dialog"]')?.getAnimations() ?? []).map((a) => a.finished))
+      })
+      const box = (await track.boundingBox())!
       return { x: box.x + 14 + (i / (n - 1)) * (box.width - 28), y: box.y + box.height / 2 }
     }
     const button = page.getByTestId('effort-menu')
@@ -185,7 +189,7 @@ test.describe.serial('Duet 2: look, commands, sync, usage, command line', () => 
     const to = await stopX('effort-slider', 2, 4)
     await page.mouse.move(from.x, from.y)
     await page.mouse.down()
-    await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 4 })
+    await page.mouse.move(from.x + (to.x - from.x) * 0.65, to.y, { steps: 4 })
     await expect(page.getByTestId('effort-popover')).toContainText('High') // previewed while dragging
     await page.mouse.move(to.x + 3, to.y, { steps: 4 })
     await page.mouse.up()

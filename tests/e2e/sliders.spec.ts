@@ -56,6 +56,9 @@ test.describe('slider regression checks', () => {
     const { page } = ctx
     await page.getByTestId('effort-menu').click()
     const slider = page.getByTestId('effort-slider').getByRole('slider')
+    await slider.evaluate(async (el) => {
+      await Promise.all((el.closest('[role="dialog"]')?.getAnimations() ?? []).map((a) => a.finished))
+    })
     const box = (await slider.boundingBox())!
     const x = box.x + 14 + (box.width - 28) * 0.65
     await page.mouse.move(box.x + 14, box.y + 15)

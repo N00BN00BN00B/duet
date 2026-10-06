@@ -19,7 +19,7 @@ interface PopoverProps {
 
 const MARGIN = 8
 
-function compute(anchor: DOMRect, pop: DOMRect, placement: Placement, offset: number): { top: number; left: number; flipped: boolean } {
+function compute(anchor: DOMRect, pop: Pick<DOMRect, 'width' | 'height'>, placement: Placement, offset: number): { top: number; left: number; flipped: boolean } {
   const vw = window.innerWidth
   const vh = window.innerHeight
   let top = 0
@@ -55,13 +55,16 @@ function compute(anchor: DOMRect, pop: DOMRect, placement: Placement, offset: nu
 
 export function Popover({ anchor, open, onClose, placement = 'bottom-start', offset = 6, children, className = '', width, noFocus, label }: PopoverProps) {
   const ref = useRef<HTMLDivElement>(null)
+  const close = useRef(onClose)
+  close.current = onClose
   const [pos, setPos] = useState<{ top: number; left: number; flipped: boolean } | null>(null)
 
   const place = useCallback(() => {
     const a = anchor.current
     const p = ref.current
     if (!a || !p) return
-    setPos(compute(a.getBoundingClientRect(), p.getBoundingClientRect(), placement, offset))
+    // Entry animation transforms must not change the layout used for anchoring.
+    setPos(compute(a.getBoundingClientRect(), { width: p.offsetWidth, height: p.offsetHeight }, placement, offset))
   }, [anchor, placement, offset])
 
   useLayoutEffect(() => {
@@ -82,12 +85,12 @@ export function Popover({ anchor, open, onClose, placement = 'bottom-start', off
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node
       if (ref.current?.contains(t) || anchor.current?.contains(t)) return
-      onClose()
+      close.current()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
-        onClose()
+        close.current()
       }
     }
     document.addEventListener('mousedown', onDown, true)
@@ -98,7 +101,7 @@ export function Popover({ anchor, open, onClose, placement = 'bottom-start', off
       document.removeEventListener('mousedown', onDown, true)
       document.removeEventListener('keydown', onKey, true)
     }
-  }, [open, place, onClose, anchor, noFocus])
+  }, [open, place, anchor])
 
   useEffect(() => {
     if (!open || noFocus) return
