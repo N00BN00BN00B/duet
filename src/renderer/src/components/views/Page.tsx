@@ -51,5 +51,5 @@ export function Card({ children, className = '', ...rest }: { children: ReactNod
 }
 
 export function Row({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`flex min-h-[48px] items-center gap-3 border-b border-line px-4 py-2.5 last:border-b-0 ${className}`}>{children}</div>
+  return <div className={`flex min-h-[48px] flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-2.5 last:border-b-0 ${className}`}>{children}</div>
 }

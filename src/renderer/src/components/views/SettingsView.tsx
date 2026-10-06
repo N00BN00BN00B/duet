@@ -159,16 +159,16 @@ export function SettingsView() {
             <div className="flex-1">
               <div className="text-[13px]">Start new threads with</div>
             </div>
-            <div className="w-[220px]">
+            <div className="w-[220px] max-w-full">
               <Segmented value={settings.defaultProvider} onChange={(v) => void saveSettings({ defaultProvider: v })} options={PROVIDERS.map((p) => ({ value: p, label: PROVIDER_LABEL[p], icon: <ProviderLogo provider={p} size={12} /> }))} />
             </div>
           </Row>
           <Row>
-            <div className="flex-1">
+            <div className="min-w-[200px] flex-1">
               <div className="text-[13px]">Default permissions</div>
               <div className="text-[11.5px] text-fg-3">{ACCESS_MODES.find((m) => m.id === settings.defaultAccess)?.hint}</div>
             </div>
-            <div className="w-[400px]">
+            <div className="w-[400px] max-w-full">
               <Segmented size="sm" value={settings.defaultAccess} onChange={(v) => void saveSettings({ defaultAccess: v })} options={ACCESS_MODES.map((m) => ({ value: m.id, label: m.label }))} />
             </div>
           </Row>
@@ -197,7 +197,7 @@ export function SettingsView() {
         <Card>
           <Row>
             <div className="flex-1 text-[13px]">Theme</div>
-            <div className="w-[260px]">
+            <div className="w-[260px] max-w-full">
               <Segmented<ThemePref>
                 value={settings.theme}
                 onChange={(v) => void saveSettings({ theme: v })}
@@ -211,7 +211,7 @@ export function SettingsView() {
           </Row>
           <Row>
             <div className="flex-1 text-[13px]">Text size</div>
-            <div className="w-[260px]">
+            <div className="w-[260px] max-w-full">
               <Segmented value={String(settings.fontSize)} onChange={(v) => void saveSettings({ fontSize: Number(v) })} options={['13', '14', '15', '16'].map((v) => ({ value: v, label: `${v}px` }))} />
             </div>
           </Row>

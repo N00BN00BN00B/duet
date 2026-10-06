@@ -175,5 +175,8 @@ describe('renderer helpers', () => {
     expect(projectName('/Users/me/Desktop/Duet/')).toBe('Duet')
     expect(tildify('/Users/me/x', '/Users/me')).toBe('~/x')
     expect(resetsIn(now + 90 * 60_000, now)).toBe('resets in 1h 30m')
+    expect(resetsIn(now + 3 * 3_600_000 - 1000, now)).toBe('resets in 3h 0m')
+    expect(resetsIn(now + 20_000, now)).toBe('resets in 1m')
+    expect(resetsIn(now - 1, now)).toBe('resetting')
   })
 })

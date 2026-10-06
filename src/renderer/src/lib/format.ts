@@ -53,8 +53,9 @@ export function resetsIn(ts: number | undefined, now = Date.now()): string {
   if (!ts) return ''
   const ms = ts - now
   if (ms <= 0) return 'resetting'
-  const h = Math.floor(ms / 3_600_000)
-  const m = Math.round((ms % 3_600_000) / 60_000)
+  const totalMinutes = Math.max(1, Math.round(ms / 60_000))
+  const h = Math.floor(totalMinutes / 60)
+  const m = totalMinutes % 60
   if (h >= 48) return `resets in ${Math.round(h / 24)}d`
   if (h >= 1) return `resets in ${h}h ${m}m`
   return `resets in ${m}m`
