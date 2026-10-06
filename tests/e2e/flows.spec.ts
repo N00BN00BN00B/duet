@@ -246,6 +246,22 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     expect(files.some((f) => f.endsWith('.json'))).toBe(true)
   })
 
+  test('Backups: restore brings files back and keeps a safety copy', async () => {
+    const { page, home } = ctx
+    // Change a file that is in the backup, then restore it.
+    writeFileSync(join(home, '.claude', 'CLAUDE.md'), 'edited after backup\n')
+    await page.locator('[data-testid="backup-row"]').first().getByRole('button', { name: 'Restore…' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Restore from backup')
+    // Leave Duet's own data alone so the app doesn't restart mid-test.
+    await dialog.getByText('Duet', { exact: true }).click()
+    await dialog.getByRole('button', { name: 'Restore', exact: true }).click()
+    await expect(page.getByText(/Restored \d+ files/)).toBeVisible({ timeout: 30_000 })
+    expect(readFileSync(join(home, '.claude', 'CLAUDE.md'), 'utf8')).toContain('Be concise')
+    await expect(page.locator('[data-testid="backup-row"]')).toHaveCount(2)
+    await expect(page.getByText('before restore')).toBeVisible()
+  })
+
   test('History: imports a Claude session and continues it', async () => {
     const { page } = ctx
     await page.getByTestId('nav-history').click()
