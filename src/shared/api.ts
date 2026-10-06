@@ -16,6 +16,8 @@ import type {
   PersonalityPreset,
   ProviderId,
   ProviderStatus,
+  RoutingStatus,
+  RoutingCombo,
   SendInput,
   Settings,
   SlashCommand,
@@ -35,6 +37,16 @@ import type { ThemeSpec } from './theme'
  * can never drift apart.
  */
 export interface DuetApi {
+  routing: {
+    status(): Promise<RoutingStatus>
+    connect(input: { endpoint: string; enabled: boolean; dataKey?: string; adminKey?: string }): Promise<RoutingStatus>
+    install(): Promise<RoutingStatus>
+    start(): Promise<RoutingStatus>
+    stop(): Promise<RoutingStatus>
+    saveCombo(input: { id: string; strategy: 'failover' | 'round-robin'; targets: RoutingCombo['targets'] }): Promise<RoutingStatus>
+    removeCombo(id: string): Promise<RoutingStatus>
+    dashboard(): Promise<void>
+  }
   app: {
     info(): Promise<{ version: string; platform: string; userData: string; fake: boolean; home: string; chatsDir: string }>
     /** Adds an existing folder as a project; returns its path. */
@@ -160,6 +172,7 @@ export interface DuetApi {
 type AsyncGroups = Omit<DuetApi, 'on' | 'util'>
 
 export const API_CHANNELS: { [G in keyof AsyncGroups]: (keyof AsyncGroups[G])[] } = {
+  routing: ['status', 'connect', 'install', 'start', 'stop', 'saveCombo', 'removeCombo', 'dashboard'],
   app: ['info', 'addProject', 'isFolder', 'openExternal', 'reveal', 'openPath', 'pickFolder', 'pickFiles', 'notify', 'setBadge'],
   threads: ['list', 'get', 'create', 'update', 'remove', 'send', 'stop', 'respond', 'fork', 'exportMarkdown', 'compact'],
   providers: ['status', 'refresh', 'commands', 'login', 'installCommand', 'loginStatus'],

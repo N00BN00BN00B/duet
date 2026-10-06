@@ -31,6 +31,15 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 - Each agent keeps its own native session. When you switch, Duet hands the other agent a compact transcript of what it missed — messages, commands run, files edited — so it continues seamlessly. Switch back and only the new part is handed over.
 - One model picker for both agents (switching models across agents switches the agent), reasoning effort, and four permission modes: **Plan**, **Ask**, **Auto-edit**, **Full access**.
 
+**More models, with routing**
+
+- Connect the [OpenCodex](https://github.com/lidge-jun/opencodex) routing engine to use its supported providers with either agent: Gemini, Grok, DeepSeek, Kimi, Qwen, OpenRouter, local Ollama models and more.
+- **Settings → Models & routing** installs a private copy of the engine, starts it when needed and opens its provider dashboard inside Duet. You can also connect an existing local or HTTPS server.
+- The model menu discovers the models your providers advertise, grouped by provider. Your native Claude and Codex models stay available.
+- Create named routes with **ordered fallback** or **weighted distribution**, then select the route like a model. Provider access and billing still apply to each target.
+- API and admin keys are stored separately through the system Keychain encryption and excluded from Duet backups. Codex receives the API key through its process environment, not a saved config file.
+- Switching between native and routed connections starts a session with the conversation as context. An unavailable routed model fails visibly without silently using a native model.
+
 **A great place to work with agents**
 - Streaming markdown with syntax highlighting, and Claude Code-style work logs: one plain line per step ("Ran `npm test`", "Edited `src/app.ts` +3 −1", "Called `take_screenshot`") that opens into commands with live output, diffs, MCP calls and subagents, plus live plans/to-dos.
 - Screenshots and other pictures that tools return (MCP screenshot tools, image viewers, generated images) show right in the conversation — click one for full size.
@@ -122,6 +131,19 @@ Every Duet thread stores its own timeline plus, per agent, the id of that agent'
 1. If the chosen agent has never been in this thread, Duet starts a native session and prepends the conversation so far.
 2. If it has, Duet resumes its native session (`claude --resume`, Codex `thread/resume`) and only sends what happened since its last turn. For Codex the hand-off is injected natively as history (`thread/inject_items`); for Claude it is a compact preamble.
 3. If a native session can't be resumed anymore, Duet transparently starts a fresh one with the full transcript.
+
+## Connect more models
+
+1. Open **Settings → Models & routing → Install engine**. The installer needs Node/npm; the engine includes its own Bun runtime.
+2. Choose **Providers**, add the providers you use, and sign in or enter their API keys. For Ollama, start Ollama and install the models you want first.
+3. Return to Settings and choose **Refresh models**. The models appear in the composer, grouped by provider and the agent that will run them.
+4. Choose **New route**, select a preferred model and backups, and save. Select the named route in the model menu.
+
+The managed engine listens only on `127.0.0.1:10101`, keeps its state in Duet's data folder, and stops when Duet quits. Its Codex/Claude configuration folders are isolated from your normal CLI configuration. An existing server uses the address under **Connection settings**; a remote server requires HTTPS and its data-plane key, plus a separate admin key to edit routes.
+
+Provider models have their own capabilities, quotas and terms. A Claude or ChatGPT subscription does not automatically grant access to every provider. Image and reasoning controls use the metadata the routing server supplies. Routed Codex models do not inherit native Fast mode.
+
+OpenCodex is an independent MIT-licensed project. See [third-party notices](docs/third-party-notices.md).
 
 ## Where your data lives
 

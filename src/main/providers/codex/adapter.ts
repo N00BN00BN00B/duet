@@ -14,11 +14,16 @@ import { NativeSessionLostError, type Emit, type ProviderAdapter, type TurnReque
 import { CodexRpc, RpcError } from './rpc'
 import { CodexThreadMapper, codexRateWindows, unwrapShell } from './mapper'
 import { saveToolImage } from '../../util/toolImages'
+import { modelEffort } from '@shared/routing'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any
 
 export interface CodexDeps {
+  routing?: {
+    ensureModel: (model: string | undefined, hasImages: boolean) => Promise<ModelOption | undefined>
+    codexConfig: (model: string | undefined) => { model: string | undefined; modelProvider?: string; config?: Json }
+  }
   binary: () => string | null
   env: () => NodeJS.ProcessEnv
   appVersion: string
@@ -190,6 +195,10 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   async startTurn(req: TurnRequest, emit: Emit): Promise<void> {
+    const selected = await this.deps.routing?.ensureModel(req.model, req.attachments.some((a) => a.mime.startsWith('image/')))
+    req = { ...req, effort: modelEffort(selected, req.effort) }
+    const routing = this.deps.routing?.codexConfig(req.model)
+    const model = routing?.model ?? req.model
     const rpc = await this.ensureServer()
     const st = this.stateFor(req, emit)
     if (st.active) throw new Error('Codex is still working on the previous message.')
@@ -214,16 +223,19 @@ export class CodexAdapter implements ProviderAdapter {
       } else {
         const params: Json = {
           cwd: req.cwd,
-          model: req.model ?? null,
+          model: model ?? null,
+          ...(routing?.modelProvider ? { modelProvider: routing.modelProvider } : {}),
           approvalPolicy: policy.approvalPolicy,
           sandbox: policy.sandbox,
           developerInstructions: req.instructions || null,
-          config: { 'tools.update_plan.enabled': true }
+          config: { 'tools.update_plan.enabled': true, ...routing?.config }
         }
         let res: Json
         try {
           res = await rpc.request('thread/start', params)
-        } catch {
+        } catch (error) {
+          // Dropping a routed provider config could send the prompt to the native account.
+          if (routing?.modelProvider) throw error
           delete params.config
           res = await rpc.request('thread/start', params)
         }
@@ -266,12 +278,12 @@ export class CodexAdapter implements ProviderAdapter {
             threadId: st.codexId,
             input,
             cwd: req.cwd,
-            model: req.model ?? null,
+            model: model ?? null,
             effort: req.effort ?? null,
             approvalPolicy: policy.approvalPolicy,
             sandboxPolicy: policy.sandboxPolicy,
             summary: 'auto',
-            ...(req.fast ? { serviceTier: 'priority' } : {})
+            ...(req.fast && !routing?.modelProvider ? { serviceTier: 'priority' } : {})
           })
       if (res?.turn?.id) {
         st.rootTurnId = res.turn.id
@@ -287,7 +299,8 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   private async resumeThread(rpc: CodexRpc, threadId: string, req: TurnRequest, policy: ReturnType<typeof codexPolicy>): Promise<void> {
-    const params = { threadId, cwd: req.cwd, model: req.model ?? null, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, developerInstructions: req.instructions || null, excludeTurns: true }
+    const routing = this.deps.routing?.codexConfig(req.model)
+    const params = { threadId, cwd: req.cwd, model: routing?.model ?? req.model ?? null, ...(routing?.modelProvider ? { modelProvider: routing.modelProvider, config: routing.config } : {}), approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, developerInstructions: req.instructions || null, excludeTurns: true }
     try {
       await rpc.request('thread/resume', params)
     } catch (error) {
@@ -318,6 +331,8 @@ export class CodexAdapter implements ProviderAdapter {
 
   /** Makes sure the thread exists in Codex before a hand-off injection. */
   async prepareThread(req: TurnRequest, emit: Emit): Promise<string | undefined> {
+    await this.deps.routing?.ensureModel(req.model, req.attachments.some((a) => a.mime.startsWith('image/')))
+    const routing = this.deps.routing?.codexConfig(req.model)
     const rpc = await this.ensureServer()
     const st = this.stateFor(req, emit)
     const policy = codexPolicy(req.access)
@@ -332,11 +347,12 @@ export class CodexAdapter implements ProviderAdapter {
     } else {
       const res = await rpc.request('thread/start', {
         cwd: req.cwd,
-        model: req.model ?? null,
+        model: routing?.model ?? req.model ?? null,
+        ...(routing?.modelProvider ? { modelProvider: routing.modelProvider } : {}),
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
         developerInstructions: req.instructions || null,
-        config: { 'tools.update_plan.enabled': true }
+        config: { 'tools.update_plan.enabled': true, ...routing?.config }
       })
       st.codexId = res.thread.id as string
     }
@@ -914,6 +930,21 @@ export class CodexAdapter implements ProviderAdapter {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.rpc?.kill()
     this.rpc = null
+  }
+
+  /** Apply new connection credentials without placing them in RPC messages or saved config. */
+  async resetConnection(): Promise<void> {
+    if ([...this.threads.values()].some((st) => st.active)) throw new Error('Stop Codex before changing the routing connection.')
+    if (this.starting) await this.starting.catch(() => undefined)
+    const rpc = this.rpc
+    if (!rpc || rpc.exited) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 4000)
+      rpc.child.once('exit', () => { clearTimeout(timer); resolve() })
+      rpc.kill()
+    })
+    if (this.rpc === rpc) this.rpc = null
+    for (const st of this.threads.values()) st.loaded = false
   }
 }
 

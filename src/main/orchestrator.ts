@@ -26,6 +26,7 @@ const MAX_TOOL_OUTPUT = 256 * 1024
 const DELTA_FLUSH_MS = 24
 
 export interface OrchestratorDeps {
+  sessionKey?: (provider: ProviderId, model: string | undefined) => string | undefined
   store: Store
   adapters: Record<ProviderId, ProviderAdapter>
   broadcast: (event: DuetEvent) => void
@@ -280,7 +281,15 @@ export class Orchestrator {
       this.push(id, { kind: 'switch', id: `s-${randomUUID()}`, ts: Date.now(), from: previousProvider, to: provider, model: meta.models[provider] })
     }
 
-    const native = meta.native[provider]
+    let native = meta.native[provider]
+    const backend = this.deps.sessionKey?.(provider, meta.models[provider])
+    if (native && native.backend !== backend) {
+      // A provider switch must never reuse credentials or a model provider from the old connection.
+      adapter.release(id)
+      meta.native = { ...meta.native }
+      delete meta.native[provider]
+      native = undefined
+    }
     const handoff = native ? buildHandoff(before, native.syncedTo, provider) : buildHandoff(before, 0, provider, { force: true })
 
     const userText = text || (input.review ? '/review' : '(see attached files)')
@@ -496,7 +505,8 @@ export class Orchestrator {
         const existing = meta.native[provider]
         if (existing?.id === event.nativeId) return
         // A different native session starts over: nothing seen yet, no cost carried over.
-        this.touch({ ...meta, native: { ...meta.native, [provider]: { id: event.nativeId, syncedTo: 0 } } }, false)
+        const backend = this.deps.sessionKey?.(provider, meta.models[provider])
+        this.touch({ ...meta, native: { ...meta.native, [provider]: { id: event.nativeId, syncedTo: 0, ...(backend ? { backend } : {}) } } }, false)
         return
       }
       case 'item': {

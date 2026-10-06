@@ -7,6 +7,7 @@ import { DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, normalizeTheme, type ThemeSpec
 const MAX_CACHED_THREADS = 8
 
 export const DEFAULT_SETTINGS: Settings = {
+  routing: { enabled: false, endpoint: 'http://127.0.0.1:10100' },
   theme: 'system',
   defaultProvider: 'claude',
   defaultModels: {},
@@ -126,6 +127,7 @@ export class Store {
       defaultModels: { ...saved.defaultModels },
       defaultEfforts: { ...saved.defaultEfforts },
       personality: { ...DEFAULT_SETTINGS.personality, ...(saved.personality ?? {}) },
+      routing: { ...DEFAULT_SETTINGS.routing, ...(saved.routing ?? {}) },
       // Saved themes are re-checked on load, so a hand-edited settings file can't break the UI.
       customThemes: (Array.isArray(saved.customThemes) ? saved.customThemes : []).map((t) => normalizeTheme(t)).filter((t): t is ThemeSpec => !!t)
     }

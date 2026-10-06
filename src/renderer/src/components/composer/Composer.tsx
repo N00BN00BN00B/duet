@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { AccessMode, Attachment, FileSuggestion, ProviderId, ReviewTarget, SlashCommand, ThreadMeta } from '@shared/types'
 import { PROVIDER_LABEL } from '@shared/types'
+import { modelEffort, routedModel } from '@shared/routing'
 import { duet, errorMessage } from '@/lib/api'
 import { projectName, tildify } from '@/lib/format'
 import { agentCommands, DUET_COMMANDS, parseCommand, rankCommands, reviewTarget, type CommandEntry } from '@/lib/commands'
@@ -185,8 +186,9 @@ export function Composer({ mode, meta, project, onPickProject, autoFocusKey }: C
   const status = providers[provider]
   const models = status?.models ?? []
   const model = mode === 'thread' && meta ? meta.models[provider] : settings?.defaultModels[provider]
-  const modelInfo = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault) ?? models[0]
-  const effort = mode === 'thread' && meta ? meta.efforts[provider] : settings?.defaultEfforts[provider]
+  const modelInfo = models.find((m) => m.id === model) ?? (routedModel(model) === undefined ? models.find((m) => m.isDefault) ?? models[0] : undefined)
+  const savedEffort = mode === 'thread' && meta ? meta.efforts[provider] : settings?.defaultEfforts[provider]
+  const effort = routedModel(model) !== undefined && !modelInfo ? undefined : modelEffort(modelInfo, savedEffort, provider)
   const access: AccessMode = mode === 'thread' && meta ? meta.access : (settings?.defaultAccess ?? 'ask')
   const running = !!meta && (meta.status === 'running' || meta.status === 'approval')
   const cwd = mode === 'thread' && meta ? meta.cwd : (project ?? '')

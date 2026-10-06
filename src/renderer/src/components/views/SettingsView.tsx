@@ -10,6 +10,7 @@ import { IconExternal, IconFolder, IconHardDrive, IconLogin, IconPalette, IconRe
 import { Button, Chip, Kbd, Meter, Segmented, Switch, inputClass } from '../ui/primitives'
 import { modelLabel } from '../composer/pickers'
 import { Card, Page, Row, Section } from './Page'
+import { RoutingSection } from './RoutingSection'
 
 function AgentCard({ id }: { id: ProviderId }) {
   const status = useApp((s) => s.providers[id])
@@ -151,6 +152,8 @@ export function SettingsView() {
           <AgentCard key={p} id={p} />
         ))}
       </Section>
+
+      <RoutingSection />
 
       <Section title="Behavior">
         <Card>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, nativeTheme, net, Notification, protocol, session, shell, webContents, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeTheme, net, Notification, protocol, safeStorage, session, shell, webContents, type MenuItemConstructorOptions } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
@@ -37,6 +37,8 @@ import { claudeHome, codexHome } from './features/history'
 import { fakeMcpDeps } from './features/fakeMcp'
 import { initLogger, logLine } from './logger'
 import { saveToolImage } from './util/toolImages'
+import { RoutingService } from './features/routing'
+import { modelEffort } from '@shared/routing'
 import { findTheme, normalizeTheme, parseColor, resolveTheme, toHex, type ThemeSpec } from '@shared/theme'
 
 protocol.registerSchemesAsPrivileged([{ scheme: FILE_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
@@ -66,6 +68,8 @@ let mainWindow: BrowserWindow | null = null
 let store: Store
 let orchestrator: Orchestrator
 let adapters: Record<ProviderId, ProviderAdapter>
+let routing: RoutingService
+let changingRouting = false
 let terminals: TerminalManager
 let usage: UsageService
 let quitting = false
@@ -206,11 +210,18 @@ function setBadge(count: number): void {
 
 // ---------- providers ----------
 
+async function providerStatus(id: ProviderId, force = false) {
+  const status = await adapters[id].status(force)
+  const models = await routing.models().catch(() => [])
+  const routed = models.map((model) => ({ ...model, efforts: model.efforts?.filter((effort) => !!modelEffort(model, effort, id)), defaultEffort: modelEffort(model, model.defaultEffort, id) }))
+  return { ...status, models: [...status.models, ...routed] }
+}
+
 async function refreshProviders(force = false, only?: ProviderId): Promise<void> {
   await Promise.all(
     PROVIDERS.filter((p) => !only || p === only).map(async (id) => {
       try {
-        const status = await adapters[id].status(force)
+        const status = await providerStatus(id, force)
         broadcast({ type: 'provider-status', status })
       } catch (error) {
         log('[status]', id, (error as Error).message)
@@ -414,6 +425,7 @@ function relaunchSoon(delayMs: number): void {
       quitting = true
       terminals?.killAll()
       await Promise.all(Object.values(adapters).map((a) => a.shutdown().catch(() => undefined)))
+      await routing?.shutdown()
       app.relaunch()
       app.exit(0)
     })()
@@ -492,7 +504,37 @@ function inBackupDir(file: string): boolean {
 }
 
 function handlers(): HandlerMap {
+  const idleRouting = () => {
+    if (store.listMetas().some((m) => orchestrator.isRunning(m.id))) throw new Error('Stop the agents before changing the routing connection.')
+  }
+  const routingChange = async (action: () => Promise<unknown>) => {
+    if (changingRouting) throw new Error('A routing change is already in progress.')
+    idleRouting()
+    changingRouting = true
+    try {
+      const result = await action()
+      if (adapters.codex instanceof CodexAdapter) await adapters.codex.resetConnection()
+      // Idle Claude processes retain their launch environment. Resume with the new keys.
+      for (const meta of store.listMetas()) adapters.claude.release(meta.id)
+      await refreshProviders()
+      return result
+    } finally { changingRouting = false }
+  }
   return {
+    routing: {
+      status: () => routing.status(true),
+      connect: (input) => routingChange(() => routing.connect(input)),
+      install: () => routingChange(() => routing.install()),
+      start: () => routingChange(() => routing.start()),
+      stop: () => routingChange(() => routing.stop()),
+      saveCombo: (input) => routingChange(() => routing.saveCombo(input)),
+      removeCombo: (id: string) => routingChange(() => routing.removeCombo(id)),
+      dashboard: async () => {
+        const status = await routing.status()
+        if (!status.connected) throw new Error(status.error || 'Start the routing engine first.')
+        broadcast({ type: 'browser-open', url: status.endpoint })
+      }
+    },
     app: {
       info: () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), fake: FAKE, home: homedir(), chatsDir: chatsDir() }),
       addProject: (path: string) => {
@@ -540,6 +582,7 @@ function handlers(): HandlerMap {
       },
       remove: (id: string) => orchestrator.remove(id),
       send: async (id: string, input: SendInput) => {
+        if (changingRouting) throw new Error('Wait for routing setup to finish before starting an agent.')
         const clean = cleanSendInput(input)
         if (store.getMeta(id)?.lazy) await orchestrator.hydrate(id, loadSource)
         return orchestrator.send(id, clean)
@@ -554,10 +597,10 @@ function handlers(): HandlerMap {
       exportMarkdown: (id: string) => orchestrator.exportMarkdown(id)
     },
     providers: {
-      status: () => Promise.all(PROVIDERS.map((p) => adapters[p].status(false))),
+      status: () => Promise.all(PROVIDERS.map((p) => providerStatus(p))),
       refresh: async (id?: ProviderId) => {
         await refreshProviders(true, id)
-        return Promise.all(PROVIDERS.map((p) => adapters[p].status(false)))
+        return Promise.all(PROVIDERS.map((p) => providerStatus(p)))
       },
       commands: (id: ProviderId, cwd: string) => (PROVIDERS.includes(id) ? adapters[id].commands(cwd) : []),
       login: async (id: ProviderId) => {
@@ -943,24 +986,37 @@ async function bootstrap(): Promise<void> {
     }
   })
 
+  routing = new RoutingService({
+    root: store.root,
+    settings: () => store.settings.routing,
+    saveSettings: (value) => store.updateSettings({ routing: value }),
+    env: getEnv,
+    encrypt: (value) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Unlock your system keychain before saving routing keys.')
+      return safeStorage.encryptString(value)
+    },
+    decrypt: (value) => safeStorage.decryptString(value)
+  })
+
   adapters = FAKE
     ? { claude: new FakeAdapter('claude', undefined, store.attachmentsDir), codex: new FakeAdapter('codex', undefined, store.attachmentsDir) }
     : {
-        claude: new ClaudeAdapter({ binary: () => findBinary('claude', store.settings.claudePath), env: getEnv, attachmentsDir: store.attachmentsDir, prepareImage, log }),
-        codex: new CodexAdapter({ binary: () => findBinary('codex', store.settings.codexPath), env: getEnv, appVersion: app.getVersion(), attachmentsDir: store.attachmentsDir, log })
+        claude: new ClaudeAdapter({ binary: () => findBinary('claude', store.settings.claudePath), env: getEnv, attachmentsDir: store.attachmentsDir, prepareImage, log, routing: { ensureModel: (m, images) => routing.ensureModel(m, images), claudeEnv: (m, env) => routing.claudeEnv(m, env) } }),
+        codex: new CodexAdapter({ binary: () => findBinary('codex', store.settings.codexPath), env: () => routing.codexEnv(getEnv()), appVersion: app.getVersion(), attachmentsDir: store.attachmentsDir, log, routing: { ensureModel: (m, images) => routing.ensureModel(m, images), codexConfig: (m) => routing.codexConfig(m) } })
       }
 
   orchestrator = new Orchestrator({
     store,
     adapters,
+    sessionKey: (_provider, model) => routing.sessionKey(model),
     broadcast,
     notify,
     onBadge: setBadge,
     onLimits: (provider) => {
-      void adapters[provider].status(false).then((status) => {
+      void providerStatus(provider).then((status) => {
         broadcast({ type: 'provider-status', status })
         writeLimitsCache()
-      })
+      }).catch((error) => log('[status]', provider, (error as Error).message))
     },
     injectHandoff: async (provider, req, handoff, emit) => {
       const codex = adapters.codex
@@ -1018,6 +1074,7 @@ if (!app.requestSingleInstanceLock()) {
         terminals?.killAll()
         await orchestrator.shutdown()
         await Promise.all(Object.values(adapters).map((a) => a.shutdown().catch(() => undefined)))
+        await routing?.shutdown()
       } finally {
         app.quit()
       }

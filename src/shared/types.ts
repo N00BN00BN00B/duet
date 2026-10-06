@@ -37,6 +37,41 @@ export interface ModelOption {
   supportsImages?: boolean
   /** A faster paid tier the model offers (Codex "Fast"). */
   fastTier?: { id: string; name: string; description: string }
+  /** Model served through the optional routing engine, with its real destination shown. */
+  routing?: { model: string; provider: string; combo?: boolean }
+}
+
+export interface RoutingSettings {
+  enabled: boolean
+  endpoint: string
+}
+
+export interface RoutingTarget {
+  provider: string
+  model: string
+  weight: number
+}
+
+export interface RoutingCombo {
+  id: string
+  model: string
+  strategy: string
+  targets: RoutingTarget[]
+}
+
+export interface RoutingStatus {
+  connected: boolean
+  managedInstalled: boolean
+  managedRunning: boolean
+  endpoint: string
+  models: ModelOption[]
+  combos: RoutingCombo[]
+  canManage: boolean
+  hasDataKey: boolean
+  hasAdminKey: boolean
+  version?: string
+  error?: string
+  managementError?: string
 }
 
 export interface Attachment {
@@ -189,6 +224,8 @@ export type TimelineItem =
 export type ThreadStatus = 'idle' | 'running' | 'approval' | 'error'
 
 export interface NativeSession {
+  /** Connection used by this session; changing it starts a session with the transcript as context. */
+  backend?: string
   /** Claude session id or Codex thread id. */
   id: string
   /** Number of timeline items this native session has already "seen". */
@@ -397,6 +434,7 @@ export interface PersonalitySettings {
 }
 
 export interface Settings {
+  routing: RoutingSettings
   theme: ThemePref
   defaultProvider: ProviderId
   defaultModels: Partial<Record<ProviderId, string>>

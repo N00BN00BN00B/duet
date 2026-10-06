@@ -19,11 +19,16 @@ import { binaryVersion } from '../../env'
 import { NativeSessionLostError, type Emit, type ProviderAdapter, type TurnRequest } from '../types'
 import { ClaudeMapper, claudeRateWindows } from './mapper'
 import { describeClaudeApproval } from './describe'
+import { modelEffort, routedModel } from '@shared/routing'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any
 
 export interface ClaudeDeps {
+  routing?: {
+    ensureModel: (model: string | undefined, hasImages: boolean) => Promise<ModelOption | undefined>
+    claudeEnv: (model: string | undefined, env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv
+  }
   binary: () => string | null
   env: () => NodeJS.ProcessEnv
   attachmentsDir: string
@@ -340,11 +345,15 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (resume) args.push('--resume', sessionId)
     else args.push('--session-id', sessionId)
     this.deps.log?.('[claude] spawn', bin, args.filter((a) => a !== req.instructions).join(' '), 'cwd', req.cwd)
-    const session = new ClaudeSession(bin, args, req.cwd, this.deps.env(), sessionId, req.model, req.effort, mode, req.access, emit, this.saveImage, req.instructions)
+    const env = this.deps.routing?.claudeEnv(req.model, this.deps.env()) ?? this.deps.env()
+    const model = routedModel(req.model) ?? req.model
+    const modelFlag = args.indexOf('--model')
+    if (modelFlag >= 0 && model) args[modelFlag + 1] = model
+    const session = new ClaudeSession(bin, args, req.cwd, env, sessionId, model, req.effort, mode, req.access, emit, this.saveImage, req.instructions)
     session.onCommands = (commands) => {
       if (commands.length) this.commandsCache = commands
     }
-    session.onLimits = (limits) => this.setLimits(limits)
+    if (routedModel(req.model) === undefined) session.onLimits = (limits) => this.setLimits(limits)
     session.onExit = () => {
       if (this.sessions.get(req.threadId) === session) this.sessions.delete(req.threadId)
     }
@@ -363,6 +372,8 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   async startTurn(req: TurnRequest, emit: Emit): Promise<void> {
+    const selected = await this.deps.routing?.ensureModel(req.model, req.attachments.some((a) => a.mime.startsWith('image/')))
+    req = { ...req, effort: modelEffort(selected, req.effort, 'claude') }
     let session = this.sessions.get(req.threadId)
     if (session && !session.exited && session.turnActive) throw new Error('Claude is still working on the previous message.')
     const reusable =
@@ -386,7 +397,7 @@ export class ClaudeAdapter implements ProviderAdapter {
         session.initResponse = await session.request({ subtype: 'initialize' }, INIT_TIMEOUT_MS)
         const commands = toCommands(session.initResponse?.commands ?? [])
         if (commands.length) this.commandsCache = commands
-        this.mergeStatusFromInit(session.initResponse)
+        if (routedModel(req.model) === undefined) this.mergeStatusFromInit(session.initResponse)
       } catch (error) {
         const message = (error as Error).message
         session.kill()
@@ -402,11 +413,11 @@ export class ClaudeAdapter implements ProviderAdapter {
       clearTimeout(session.idleTimer)
       session.idleTimer = null
     }
-    const wantModel = req.model && req.model !== 'default' ? req.model : undefined
+    const wantModel = req.model && req.model !== 'default' ? routedModel(req.model) ?? req.model : undefined
     if (wantModel !== (session.model && session.model !== 'default' ? session.model : undefined)) {
       try {
         await session.request({ subtype: 'set_model', model: wantModel ?? null })
-        session.model = req.model
+        session.model = wantModel
       } catch (error) {
         this.deps.log?.('[claude] set_model failed', (error as Error).message)
       }

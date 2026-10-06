@@ -7,6 +7,7 @@ import { IconCheck, IconChevronDown, IconHand, IconHelp, IconMap, IconPencil, Ic
 import { MenuLabel, MenuSeparator, Popover, useMenuKeys } from '../ui/Popover'
 import { Tooltip } from '../ui/primitives'
 import { StepSlider } from '../ui/StepSlider'
+import { nativeModels } from '@shared/routing'
 
 export function ProviderSwitch({ value, onChange, statuses, disabled }: { value: ProviderId; onChange: (p: ProviderId) => void; statuses: Partial<Record<ProviderId, ProviderStatus>>; disabled?: boolean }) {
   const idx = PROVIDERS.indexOf(value)
@@ -149,13 +150,11 @@ function ModelRow({ m, provider, active, onPick }: { m: ModelOption; provider: P
         <span className="flex items-center gap-1.5">
           <span className="truncate text-[13px] font-medium text-fg">{m.label}</span>
           {m.isDefault && <span className="rounded-full bg-surface-3 px-1.5 py-px text-[10px] text-fg-2">Default</span>}
-          {traits.tag && !m.isDefault && <span className="rounded-full bg-surface-3 px-1.5 py-px text-[10px] text-fg-3">{traits.tag}</span>}
+          {m.routing && <span className="rounded-full bg-surface-3 px-1.5 py-px text-[10px] text-fg-3">{m.routing.combo ? 'Route' : m.routing.provider}</span>}
+          {traits.tag && !m.isDefault && !m.routing && <span className="rounded-full bg-surface-3 px-1.5 py-px text-[10px] text-fg-3">{traits.tag}</span>}
         </span>
         {m.description && <span className="mt-0.5 line-clamp-2 block text-[11.5px] leading-snug text-fg-3">{m.description}</span>}
-        <span className="mt-1.5 flex items-center gap-3">
-          <Dots value={traits.smarts} label="Smarts" />
-          <Dots value={traits.speed} label="Speed" />
-        </span>
+        {m.routing ? <span className="mt-1 block truncate text-[10.5px] text-fg-3">{m.routing.model}{m.supportsImages ? ' · images' : ''}</span> : <span className="mt-1.5 flex items-center gap-3"><Dots value={traits.smarts} label="Smarts" /><Dots value={traits.speed} label="Speed" /></span>}
       </span>
       <span className={`mt-1 flex h-4 w-4 shrink-0 items-center justify-center text-accent transition-opacity duration-200 ${active ? 'opacity-100' : 'opacity-0'}`}>
         <IconCheck size={14} />
@@ -188,7 +187,7 @@ export function ModelMenu({
   const anchor = useRef<HTMLDivElement>(null)
   const keys = useMenuKeys()
   const models = statuses[provider]?.models ?? []
-  const ladder = useMemo(() => modelLadder(models), [models])
+  const ladder = useMemo(() => modelLadder(nativeModels(models)), [models])
   // Where the knob goes: on the chosen model, or hollow on its family (e.g. "Default", an older Opus).
   const chosen = model ? models.find((m) => m.id === model) ?? { id: model, label: model } : models.find((m) => m.isDefault)
   const place = ladderIndex(ladder.stops, chosen?.id === 'default' ? undefined : chosen)
@@ -200,7 +199,12 @@ export function ModelMenu({
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
     const order: ProviderId[] = [provider, ...PROVIDERS.filter((p) => p !== provider)]
-    return order.map((p) => ({ provider: p, models: (statuses[p]?.models ?? []).filter((m) => !q || m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)) }))
+    return order.flatMap((p) => {
+      const all = (statuses[p]?.models ?? []).filter((m) => !q || m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.routing?.provider.toLowerCase().includes(q))
+      const native = all.filter((m) => !m.routing)
+      const routed = all.filter((m) => m.routing)
+      return [{ provider: p, name: PROVIDER_LABEL[p], models: native }, ...[...new Set(routed.map((m) => m.routing!.provider))].sort().map((name) => ({ provider: p, name: name === 'combo' ? 'Routes' : name, models: routed.filter((m) => m.routing!.provider === name) }))]
+    })
   }, [statuses, provider, query])
   return (
     <div ref={anchor} className="min-w-0">
@@ -257,11 +261,12 @@ export function ModelMenu({
           </div>
           <div className="scroll-y max-h-[420px] space-y-0.5">
             {groups.map((g, gi) => (
-              <div key={g.provider} className="space-y-0.5">
+              <div key={`${g.provider}:${g.name}`} className="space-y-0.5">
                 {gi > 0 && <MenuSeparator />}
                 <MenuLabel>
                   <span className="flex items-center gap-1.5">
-                    {PROVIDER_LABEL[g.provider]}
+                    {g.name}
+                    {g.name !== PROVIDER_LABEL[g.provider] && <span className="font-normal text-fg-3">· via {PROVIDER_LABEL[g.provider]}</span>}
                     {g.provider !== provider && <span className="font-normal text-fg-3">· picking one switches agent</span>}
                   </span>
                 </MenuLabel>
