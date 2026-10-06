@@ -17,6 +17,18 @@ export function unwrapShell(command: unknown): string {
   return match[1] === '"' ? inner.replace(/\\"/g, '"') : inner
 }
 
+/**
+ * The Codex app wraps prompts that have attachments in a "# Files mentioned by the user … ## My request:"
+ * preamble and escapes some characters as HTML entities. Show only what the user typed.
+ */
+export function cleanUserText(text: string): string {
+  let out = text
+  const marker = out.match(/^\s*# Files mentioned by the user:[\s\S]*?\n## My request:\s*\n?/)
+  if (marker) out = out.slice(marker[0].length)
+  out = out.replace(/&#x([0-9a-f]{1,6});/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16))).replace(/&#(\d{1,7});/g, (_, dec) => String.fromCodePoint(Number(dec)))
+  return out.trim()
+}
+
 export function mapStatus(status: unknown): ItemStatus {
   switch (status) {
     case 'completed':
@@ -93,7 +105,7 @@ export function codexItemToTimeline(item: Json, ctx: CodexItemContext, ts?: numb
   switch (item.type) {
     case 'userMessage': {
       const content = Array.isArray(item.content) ? item.content : []
-      const text = content.filter((c: Json) => c?.type === 'text').map((c: Json) => c.text ?? '').join('\n')
+      const text = cleanUserText(content.filter((c: Json) => c?.type === 'text').map((c: Json) => c.text ?? '').join('\n'))
       const attachments: Attachment[] = content
         .filter((c: Json) => c?.type === 'localImage' && typeof c.path === 'string')
         .map((c: Json, i: number) => ({ id: `${item.id}-${i}`, name: basename(c.path), mime: 'image/png', path: c.path, size: 0 }))
