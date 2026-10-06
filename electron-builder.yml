@@ -32,12 +32,12 @@ mac:
       arch: [arm64]
     - target: zip
       arch: [arm64]
-  artifactName: Duet-${version}-${arch}-mac.${ext}
+  artifactName: Duet-mac-${arch}.${ext}
   extendInfo:
     NSHumanReadableCopyright: Copyright © 2026 N00BN00BN00B
 dmg:
   title: Duet ${version}
-  artifactName: Duet-${version}-${arch}.${ext}
+  artifactName: Duet-mac-${arch}.${ext}
   iconSize: 96
   contents:
     - x: 150

@@ -451,6 +451,22 @@ describe('model slider', () => {
     expect(modelLadder([{ id: 'x', label: 'Mystery' }, { id: 'y', label: 'Other' }]).stops).toEqual([])
     expect(modelTier({ id: 'gpt-5-nano', label: 'nano' })).toBe(0)
   })
+
+  it('keeps pinned and missing families near the right stop without claiming an exact match', () => {
+    const c = modelLadder(claude)
+    expect(ladderIndex(c.stops, { id: 'claude-haiku-unlisted', label: 'Pinned Haiku' })).toEqual({ index: 0, exact: false })
+    const x = modelLadder(codex)
+    expect(ladderIndex(x.stops, codex.find((m) => m.id === 'gpt-5.6-terra'))).toEqual({ index: 0, exact: false, approximate: true })
+    expect(ladderIndex(x.stops, { id: 'unknown', label: 'Unknown' })).toBeNull()
+  })
+
+  it('ranks capability before speed marketing and gives demo models distinct captions', () => {
+    expect(modelTier({ id: 'gpt-5.1-codex-max', label: 'Codex Max', description: 'Flagship coding model, fast on complex tasks' })).toBe(4)
+    expect(modelTier({ id: 'x', label: 'X', description: 'Fast, capable model for everyday work' })).toBe(3)
+    expect(modelTier({ id: 'x', label: 'X', description: 'A quick-thinking model for complex tasks' })).toBe(3)
+    expect(shortModelName('GPT (demo)')).toBe('GPT')
+    expect(shortModelName('GPT mini (demo)')).toBe('mini')
+  })
 })
 
 describe('work log', () => {
@@ -466,6 +482,14 @@ describe('work log', () => {
     expect(blocks[1].type === 'item' && blocks[1].item.id).toBe('a3')
     // Questions and plans are part of the conversation, so they always show.
     expect(buildBlocks([approval('q', 'approved', 'question'), approval('p', 'approved', 'plan')]).length).toBe(2)
+  })
+
+  it('keeps approved path and capability grants visible', () => {
+    const pathGrant = { ...approval('path', 'approved-session', 'edit'), permissionGrant: true } as TimelineItem
+    const blocks = buildBlocks([tool('t1', 'a.md'), approval('network', 'approved', 'permissions'), pathGrant, tool('t2', 'b.md')])
+    expect(blocks.map((b) => b.type)).toEqual(['work', 'item', 'item', 'work'])
+    expect(blocks[1].type === 'item' && blocks[1].item.id).toBe('network')
+    expect(blocks[2].type === 'item' && blocks[2].item.id).toBe('path')
   })
 })
 

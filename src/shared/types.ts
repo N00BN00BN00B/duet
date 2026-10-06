@@ -138,6 +138,8 @@ export interface ApprovalItem extends ItemBase {
   answers?: Record<string, string>
   status: ApprovalStatus
   canAllowForSession: boolean
+  /** A path or capability grant that must remain visible after approval. */
+  permissionGrant?: boolean
 }
 
 export interface Question {

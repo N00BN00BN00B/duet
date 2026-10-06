@@ -87,7 +87,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await page.getByTestId('approval-allow').click()
     await expect(page.getByTestId('approval-panel')).toBeHidden()
     await waitIdle(page)
-    await expect(page.getByTestId('timeline')).toContainText('Approved')
+    await expect(page.getByTestId('timeline')).not.toContainText('Approved')
     await expect(page.getByTestId('timeline')).toContainText('Ran a command')
   })
 
@@ -183,6 +183,10 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     // Real shell through node-pty: type a command and read it back from xterm.
     await page.waitForTimeout(1200)
     await page.locator('[data-testid="terminal-drawer"] .xterm').click()
+    // A neutral prompt prevents screenshot exports from exposing the host's account or machine.
+    await page.keyboard.type("export PS1='demo-app % '; clear")
+    await page.keyboard.press('Enter')
+    await expect(page.locator('[data-testid="terminal-drawer"] .xterm-rows')).toHaveText(/demo-app %/)
     await page.keyboard.type('echo duet-$((40+2))-ok')
     await page.keyboard.press('Enter')
     await expect(page.locator('[data-testid="terminal-drawer"] .xterm-rows')).toContainText('duet-42-ok', { timeout: 15_000 })

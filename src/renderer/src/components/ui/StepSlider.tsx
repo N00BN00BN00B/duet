@@ -19,6 +19,10 @@ interface StepSliderProps {
   /** The stop under the pointer while hovering or dragging; null when it leaves. */
   onPreview?: (index: number | null) => void
   label: string
+  valueText?: string
+  describedBy?: string
+  /** A pinned model with no known position on this ladder. */
+  unplaced?: boolean
   minLabel?: string
   maxLabel?: string
   showLabels?: boolean
@@ -75,21 +79,34 @@ function pixelField(width: number, height: number): Pixel[] {
  * A stepped slider in the style of Claude's effort control: drag the knob (or click, or use the
  * arrow keys) and it glides, then settles on the nearest stop with a little spring.
  */
-export function StepSlider({ stops, value, rest, recommended, onCommit, onPreview, label, minLabel, maxLabel, showLabels, autoFocus, testId }: StepSliderProps) {
+export function StepSlider({ stops, value, rest, recommended, onCommit, onPreview, label, valueText, describedBy, unplaced, minLabel, maxLabel, showLabels, autoFocus, testId }: StepSliderProps) {
   const track = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
   const [dragging, setDragging] = useState(false)
   const [hover, setHover] = useState<number | null>(null)
-  const drag = useRef<{ id: number; index: number } | null>(null)
+  const drag = useRef<{ id: number; index: number; key: string } | null>(null)
+  const stopKey = JSON.stringify(stops.map((s) => s.id))
+  const onPreviewRef = useRef(onPreview)
+  onPreviewRef.current = onPreview
   // A committed stop the parent hasn't confirmed yet (saving is async), so the knob doesn't bounce back.
-  const [pending, setPending] = useState<number | null>(null)
+  const [pending, setPending] = useState<{ index: number; key: string } | null>(null)
   const last = stops.length - 1
-  const at = Math.min(last, Math.max(0, pending ?? value ?? rest ?? recommended ?? Math.floor(last / 2)))
+  const optimistic = pending?.key === stopKey ? pending.index : null
+  const at = Math.max(0, Math.min(last, optimistic ?? value ?? rest ?? recommended ?? Math.floor(last / 2)))
+  const hasPosition = !unplaced || optimistic !== null
   const fraction = (i: number) => (last <= 0 ? 0 : i / last)
 
   useEffect(() => {
+    if (pending?.key === stopKey && value === pending.index) setPending(null)
+  }, [value, pending, stopKey])
+  useLayoutEffect(() => {
+    drag.current = null
+    setDragging(false)
+    setHover(null)
     setPending(null)
-  }, [value, stops.length])
+    onPreviewRef.current?.(null)
+    return () => onPreviewRef.current?.(null)
+  }, [stopKey])
   useEffect(() => {
     if (pending === null) return
     const t = setTimeout(() => setPending(null), 2000)
@@ -107,7 +124,9 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
   }, [])
 
   useEffect(() => {
-    if (autoFocus) requestAnimationFrame(() => track.current?.focus({ preventScroll: true }))
+    if (!autoFocus) return
+    const frame = requestAnimationFrame(() => track.current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(frame)
   }, [autoFocus])
 
   // Puts the knob on its stop after every render that isn't mid-drag. Releasing a drag re-renders
@@ -128,22 +147,22 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
 
   const preview = (i: number | null) => {
     setHover(i)
-    onPreview?.(i)
+    onPreviewRef.current?.(i)
   }
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || last <= 0) return
+    if (e.button !== 0 || last < 0) return
     e.preventDefault()
     track.current?.focus({ preventScroll: true })
     e.currentTarget.setPointerCapture(e.pointerId)
-    const f = fractionAt(e.clientX)
-    drag.current = { id: e.pointerId, index: nearest(f) }
+    const f = last === 0 ? 0 : fractionAt(e.clientX)
+    drag.current = { id: e.pointerId, index: nearest(f), key: stopKey }
     setDragging(true)
     track.current?.style.setProperty('--pos', String(f))
     preview(nearest(f))
   }
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    const f = fractionAt(e.clientX)
+    const f = last === 0 ? 0 : fractionAt(e.clientX)
     if (drag.current?.id === e.pointerId) {
       // The knob follows the pointer freely; the stop it would land on is previewed.
       track.current?.style.setProperty('--pos', String(f))
@@ -162,14 +181,16 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
     if (!d || d.id !== e.pointerId) return
     drag.current = null
     setDragging(false)
-    if (commit && (d.index !== at || value === null)) {
-      setPending(d.index)
+    if (commit && d.key === stopKey && (d.index !== at || value === null)) {
+      setPending({ index: d.index, key: stopKey })
       onCommit(d.index)
     }
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
     if (e.pointerType !== 'mouse') preview(null)
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (last < 0) return
     const step: Record<string, number> = { ArrowLeft: -1, ArrowDown: -1, PageDown: -1, ArrowRight: 1, ArrowUp: 1, PageUp: 1 }
     let next: number | null = null
     if (e.key in step) next = Math.min(last, Math.max(0, at + step[e.key]))
@@ -179,13 +200,14 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
     // Keep surrounding menus (which also use the arrow keys) out of it.
     e.preventDefault()
     e.stopPropagation()
+    if (hover !== null) preview(null)
     if (next !== at || value === null) {
-      setPending(next)
+      setPending({ index: next, key: stopKey })
       onCommit(next)
     }
   }
 
-  const shown = hover ?? at
+  const shown = hover !== null && hover >= 0 && hover <= last ? hover : at
   const knobLeft = `calc(${PAD}px + var(--pos, 0) * (100% - ${2 * PAD + KNOB}px))`
   const litTo = `calc(100% - ${INSET}px - var(--pos, 0) * (100% - ${2 * INSET}px))`
   const glide = dragging ? 'none' : `left 320ms ${SPRING}, clip-path 320ms ${SPRING}`
@@ -207,6 +229,7 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
     </svg>
   )
 
+  if (!stops.length) return null
   return (
     <div className="select-none" data-testid={testId}>
       {(minLabel || maxLabel) && (
@@ -220,25 +243,25 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
         role="slider"
         tabIndex={0}
         aria-label={label}
+        aria-describedby={describedBy}
         aria-valuemin={0}
         aria-valuemax={last}
-        aria-valuenow={at}
-        aria-valuetext={`${stops[at]?.label ?? ''}${value === null ? ' (automatic)' : ''}`}
+        aria-valuenow={hasPosition ? at : undefined}
+        aria-valuetext={valueText ?? `${stops[at]?.label ?? ''}${recommended === at ? ', recommended' : ''}`}
         data-dragging={dragging || undefined}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={(e) => finish(e, true)}
         onPointerCancel={(e) => finish(e, false)}
-        onLostPointerCapture={(e) => finish(e, true)}
+        onLostPointerCapture={(e) => finish(e, false)}
         onPointerLeave={() => !drag.current && hover !== null && preview(null)}
         onKeyDown={onKeyDown}
-        className="relative h-[30px] cursor-pointer touch-none overflow-hidden rounded-full bg-surface-2 outline-none ring-1 ring-line transition-shadow duration-200 focus-visible:ring-2 focus-visible:ring-accent/60"
-        style={{ ['--pos' as string]: fraction(at) } as CSSProperties}
+        className="relative h-[30px] cursor-pointer touch-none overflow-hidden rounded-full bg-surface-2 outline-none ring-1 ring-line transition-shadow duration-200 focus-visible:ring-2 focus-visible:ring-fg focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
       >
         {field(false)}
-        {field(true)}
+        {hasPosition && field(true)}
         {stops.map((s, i) =>
-          i === at && !dragging ? null : (
+          hasPosition && i === at && !dragging ? null : (
             <span
               key={s.id}
               aria-hidden
@@ -249,13 +272,14 @@ export function StepSlider({ stops, value, rest, recommended, onCommit, onPrevie
             />
           )
         )}
-        <span
+        {hasPosition && <span
           aria-hidden
+          data-slider-knob
           className={`pointer-events-none absolute top-[3px] h-[24px] rounded-[8px] ${
             value === null ? 'border-2 border-fg bg-[color-mix(in_srgb,var(--text)_14%,transparent)]' : 'bg-fg'
           } shadow-[0_1px_3px_rgba(0,0,0,0.35),0_0_0_0.5px_rgba(0,0,0,0.12)]`}
-          style={{ left: knobLeft, width: KNOB, transition: `${glide}, transform 160ms ease-out`, transform: dragging ? 'scale(1.08)' : 'none' }}
-        />
+          style={{ left: knobLeft, width: KNOB, transition: dragging ? 'transform 160ms ease-out' : `left 320ms ${SPRING}, transform 160ms ease-out`, transform: dragging ? 'scale(1.08)' : 'none' }}
+        />}
       </div>
       {(showLabels || recommended !== undefined) && (
         <div className="relative mt-1.5" style={{ height: showLabels && recommended !== undefined ? 32 : 16 }}>

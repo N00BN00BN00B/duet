@@ -9,10 +9,10 @@ export type Block =
 /**
  * A command, edit or tool use that was approved (once or for the whole chat) adds nothing the step
  * itself doesn't show; as a row of its own it would only split the work log into one line per step.
- * Declined, expired and still-pending requests, questions and plans stay visible.
+ * Permission grants, declined, expired and still-pending requests, questions and plans stay visible.
  */
 export function isSettledApproval(item: TimelineItem): boolean {
-  return item.kind === 'approval' && item.request !== 'question' && item.request !== 'plan' && (item.status === 'approved' || item.status === 'approved-session')
+  return item.kind === 'approval' && (item.request === 'command' || item.request === 'edit' || item.request === 'tool') && !item.permissionGrant && (item.status === 'approved' || item.status === 'approved-session')
 }
 
 /** Folds consecutive tool/reasoning items into work groups and decides where agent headers go. */

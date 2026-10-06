@@ -388,12 +388,12 @@ export const ApprovalRecord = memo(function ApprovalRecord({ item }: { item: App
             : item.status === 'approved-session'
               ? 'Always allowed'
               : 'Approved'
-  const subject = item.command ?? item.title
+  const subject = item.request === 'permissions' || item.permissionGrant ? item.detail ?? item.title : item.command ?? item.title
   return (
     <div className="flex min-w-0 items-center gap-2 py-0.5 text-[12px]">
       <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${tone}`}>{pending ? <IconShield size={13} className="breathe" /> : <IconShield size={13} />}</span>
       <span className={`shrink-0 whitespace-nowrap ${tone}`}>{verb}</span>
-      <span className="min-w-0 truncate font-mono text-[11.5px] text-fg-3">{subject}</span>
+      <span className="min-w-0 truncate font-mono text-[11.5px] text-fg-3" title={subject}>{subject}</span>
       {item.answers && (
         <span className="min-w-0 truncate text-fg-2">
           → {Object.values(item.answers).map((a) => a.split('\u001f').join(', ')).join(' · ')}

@@ -14,6 +14,7 @@
   --claude: #d97757;
   --codex: #7c8cff;
   --accent: var(--claude);
+  --accent-fg: var(--accent);
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
@@ -57,6 +58,7 @@
 }
 
 :root[data-theme='light'] {
+  --accent-fg: color-mix(in srgb, var(--accent) 65%, black);
   color-scheme: light;
   --bg: #fafaf9;
   --bg-panel: #fafaf9;
@@ -99,6 +101,7 @@
   --color-fg-2: var(--text-2);
   --color-fg-3: var(--text-3);
   --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
   --color-claude: var(--claude);
   --color-codex: var(--codex);
   --color-ok: var(--ok);

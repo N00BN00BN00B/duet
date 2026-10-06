@@ -7,14 +7,14 @@ import type { ModelOption } from '@shared/types'
  */
 export function modelTier(m: Pick<ModelOption, 'id' | 'label' | 'description'>): number | undefined {
   const d = (m.description ?? '').toLowerCase()
-  if (/most capable|frontier|hardest|most demanding/.test(d)) return 4
+  if (/most capable|frontier|flagship|hardest|most demanding/.test(d)) return 4
+  if (/\b(workhorse|everyday|complex)\b/.test(d)) return 3
   if (/fastest/.test(d)) return 0
   if (/\b(fast|affordable|quick|lightweight)\b/.test(d)) return 1
   if (/\b(efficient|routine|balanced|straightforward)\b/.test(d)) return 2
-  if (/\b(workhorse|everyday|complex)\b/.test(d)) return 3
   const name = `${m.id} ${m.label}`.toLowerCase()
-  if (/nano/.test(name)) return 0
-  if (/haiku|luna|mini|flash|spark|lite/.test(name)) return 1
+  if (/\b(nano|haiku)\b/.test(name)) return 0
+  if (/\b(luna|mini|flash|spark|lite)\b/.test(name)) return 1
   if (/sonnet|terra/.test(name)) return 2
   if (/fable|astra|\bpro\b|-pro\b/.test(name)) return 4
   if (/opus|\bsol\b|-sol\b|codex/.test(name)) return 3
@@ -26,8 +26,9 @@ const older = (m: ModelOption) => /\b(previous|older|legacy|deprecated)\b/i.test
 
 /** The family word for a stop label: "Opus 5.5" → "Opus", "GPT-6.1-Sol" → "Sol". */
 export function shortModelName(label: string): string {
-  const name = label.replace(/^gpt-[\d.]+-/i, '').replace(/\s*\(.*\)\s*$/, '')
-  return name.split(/\s+/)[0] || label
+  const clean = label.replace(/\s*\(.*\)\s*$/, '')
+  const name = clean.replace(/^gpt(?:-[\d.]+)?[-\s]+/i, '')
+  return name.split(/\s+/)[0] || clean
 }
 
 /**
@@ -60,11 +61,22 @@ export function modelLadder(models: ModelOption[]): { stops: ModelOption[]; reco
 }
 
 /** Where a model sits on the ladder: its own stop, or the stop of its family (e.g. an older Opus). */
-export function ladderIndex(stops: ModelOption[], model: ModelOption | undefined): { index: number; exact: boolean } | null {
+export function ladderIndex(stops: ModelOption[], model: ModelOption | undefined): { index: number; exact: boolean; approximate?: boolean } | null {
   if (!model) return null
   const exact = stops.findIndex((s) => s.id === model.id)
   if (exact >= 0) return { index: exact, exact: true }
   const tier = modelTier(model)
   const near = tier === undefined ? -1 : stops.findIndex((s) => modelTier(s) === tier)
-  return near >= 0 ? { index: near, exact: false } : null
+  if (near >= 0) return { index: near, exact: false }
+  if (tier === undefined || !stops.length) return null
+  let closest = -1
+  let distance = Infinity
+  for (let i = 0; i < stops.length; i++) {
+    const candidate = modelTier(stops[i])
+    if (candidate !== undefined && Math.abs(candidate - tier) < distance) {
+      closest = i
+      distance = Math.abs(candidate - tier)
+    }
+  }
+  return closest >= 0 ? { index: closest, exact: false, approximate: true } : null
 }

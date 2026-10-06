@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { AccessMode, ModelOption, ProviderId, ProviderStatus } from '@shared/types'
 import { ACCESS_MODES, PROVIDER_LABEL, PROVIDERS } from '@shared/types'
 import { ProviderLogo } from '../brand'
@@ -92,20 +92,21 @@ export function modelTraits(m: Pick<ModelOption, 'id' | 'label' | 'description'>
 }
 
 /** "Effort  High  (?)" — the popover title with the chosen (or previewed) value. */
-function SliderHeader({ title, value, previewing, help, children }: { title: string; value: string; previewing: boolean; help: string; children?: ReactNode }) {
+function SliderHeader({ title, value, previewing, help, helpId, children }: { title: string; value: string; previewing: boolean; help: string; helpId: string; children?: ReactNode }) {
   return (
     <div className="mb-3 flex items-center gap-2">
       <span className="text-[13px] text-fg-2">{title}</span>
-      <span key={value} className={`anim-fade min-w-0 truncate text-[13px] font-medium transition-opacity duration-150 ${previewing ? 'text-accent/75' : 'text-accent'}`}>
+      <span key={value} className={`anim-fade min-w-0 truncate text-[13px] font-medium text-accent-fg ${previewing ? 'italic' : ''}`}>
         {value}
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1.5">
         {children}
         <Tooltip label={<span className="block max-w-[220px] leading-snug">{help}</span>}>
-          <span className="flex h-6 w-6 items-center justify-center rounded-full text-fg-3 hover:text-fg-2" tabIndex={-1}>
+          <button type="button" aria-label={`About ${title.toLowerCase()}`} aria-describedby={helpId} className="flex h-6 w-6 items-center justify-center rounded-full text-fg-3 hover:text-fg-2">
             <IconHelp size={15} />
-          </span>
+          </button>
         </Tooltip>
+        <span id={helpId} className="sr-only">{help}</span>
       </span>
     </div>
   )
@@ -183,13 +184,19 @@ export function ModelMenu({
   }, [openSignal])
   const [query, setQuery] = useState('')
   const [preview, setPreview] = useState<number | null>(null)
+  const helpId = useId()
   const anchor = useRef<HTMLDivElement>(null)
   const keys = useMenuKeys()
   const models = statuses[provider]?.models ?? []
   const ladder = useMemo(() => modelLadder(models), [models])
   // Where the knob goes: on the chosen model, or hollow on its family (e.g. "Default", an older Opus).
-  const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault)
+  const chosen = model ? models.find((m) => m.id === model) ?? { id: model, label: model } : models.find((m) => m.isDefault)
   const place = ladderIndex(ladder.stops, chosen?.id === 'default' ? undefined : chosen)
+  const ladderKey = JSON.stringify(ladder.stops.map((m) => m.id))
+  useEffect(() => setPreview(null), [provider, ladderKey])
+  useEffect(() => { if (!open) setPreview(null) }, [open])
+  const previewStop = preview !== null ? ladder.stops[preview] : undefined
+  const shorts = ladder.stops.map((m) => shortModelName(m.label))
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
     const order: ProviderId[] = [provider, ...PROVIDERS.filter((p) => p !== provider)]
@@ -200,25 +207,29 @@ export function ModelMenu({
       <PickerButton open={open} onClick={() => setOpen((v) => !v)} label="Model" testId="model-menu">
         <span className="max-w-[9rem] truncate @[640px]/composer:max-w-[14rem]">{modelLabel(models, model)}</span>
       </PickerButton>
-      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={360}>
+      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={360} label="Model">
         <div onKeyDown={keys} className="p-1.5">
           {ladder.stops.length > 1 && (
             <>
               <div className="px-2.5 pb-2 pt-2" data-testid="model-ladder">
                 <SliderHeader
                   title="Model"
-                  value={preview !== null ? ladder.stops[preview].label : chosen?.id === 'default' && chosen.description?.includes(' · ') ? `Default · ${chosen.description.split(' · ')[0]}` : modelLabel(models, model)}
-                  previewing={preview !== null}
+                  value={previewStop?.label ?? (chosen?.id === 'default' && chosen.description?.includes(' · ') ? `Default · ${chosen.description.split(' · ')[0]}` : modelLabel(models, model))}
+                  previewing={!!previewStop}
                   help={`${PROVIDER_LABEL[provider]}'s model families, from quickest to most capable. Exact versions and the other agent's models are in the list below.`}
+                  helpId={helpId}
                 />
                 <StepSlider
-                  stops={ladder.stops.map((m) => ({ id: m.id, label: m.label, short: shortModelName(m.label) }))}
+                  stops={ladder.stops.map((m, i) => ({ id: m.id, label: m.label, short: shorts.filter((s) => s === shorts[i]).length > 1 ? m.label.replace(/\s*\(.*\)\s*$/, '') : shorts[i] }))}
                   value={place?.exact ? place.index : null}
                   rest={place?.index}
                   recommended={ladder.recommended}
                   onCommit={(i) => onPick(provider, ladder.stops[i].id)}
                   onPreview={setPreview}
                   label="Model"
+                  describedBy={helpId}
+                  unplaced={!!chosen && chosen.id !== 'default' && !place}
+                  valueText={!place?.exact ? chosen?.id === 'default' || !chosen ? 'Default (automatic model selection)' : `${chosen.label}${place ? ` (near ${ladder.stops[place.index].label})` : ' (not on this ladder)'}` : undefined}
                   minLabel="Faster"
                   maxLabel="Smarter"
                   showLabels
@@ -321,6 +332,8 @@ export function EffortMenu({
 }) {
   const [open, setOpen] = useState(false)
   const [preview, setPreview] = useState<number | null>(null)
+  const helpId = useId()
+  const effortKey = JSON.stringify(efforts)
   const anchor = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (openSignal) setOpen(true)
@@ -328,10 +341,12 @@ export function EffortMenu({
   useEffect(() => {
     if (!open) setPreview(null)
   }, [open])
+  useEffect(() => setPreview(null), [effortKey])
   if (!efforts.length) return null
   const current = value && efforts.includes(value) ? value : undefined
   const recommended = defaultEffort && efforts.includes(defaultEffort) ? efforts.indexOf(defaultEffort) : undefined
-  const shown = preview !== null ? efforts[preview] : current
+  const previewEffort = preview !== null ? efforts[preview] : undefined
+  const shown = previewEffort ?? current
   const name = (level: string) => EFFORT_LABEL[level] ?? level
   const idx = current ? efforts.indexOf(current) + 1 : efforts.indexOf(defaultEffort ?? '') + 1
   return (
@@ -340,20 +355,22 @@ export function EffortMenu({
         <EffortBars level={idx} of={efforts.length} className={current ? 'text-accent' : 'text-fg-3'} />
         <span className="hidden @[600px]/composer:inline">{current ? name(current) : 'Auto'}</span>
       </PickerButton>
-      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={320} noFocus>
+      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={320} noFocus label="Reasoning effort">
         <div className="p-3.5 pb-3" data-testid="effort-popover">
           <SliderHeader
             title="Effort"
             value={shown ? name(shown) : 'Auto'}
-            previewing={preview !== null}
+            previewing={!!previewEffort}
             help="How long the agent thinks before it answers. More effort is smarter but slower, and uses more of your limits."
+            helpId={helpId}
           >
             <button
               type="button"
-              aria-pressed={!current}
-              onClick={() => onPick(undefined)}
+              aria-label="Use automatic effort"
+              aria-disabled={!current || undefined}
+              onClick={() => { if (current) onPick(undefined) }}
               data-testid="effort-auto"
-              className={`press rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${!current ? 'bg-accent/15 text-accent ring-1 ring-accent/30' : 'text-fg-3 ring-1 ring-line hover:text-fg-2'}`}
+              className={`press rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${!current ? 'bg-accent/15 text-accent-fg ring-1 ring-accent/30' : 'text-fg-3 ring-1 ring-line hover:text-fg-2'}`}
             >
               Auto
             </button>
@@ -366,6 +383,8 @@ export function EffortMenu({
             onCommit={(i) => onPick(efforts[i])}
             onPreview={setPreview}
             label="Reasoning effort"
+            describedBy={helpId}
+            valueText={current ? undefined : `Auto (automatic${defaultEffort ? `; usually ${name(defaultEffort)}` : ''})`}
             minLabel="Faster"
             maxLabel="Smarter"
             autoFocus
@@ -459,4 +478,3 @@ export function ContextRing({ used, total }: { used: number; total?: number }) {
     </Tooltip>
   )
 }
-

@@ -648,6 +648,7 @@ export class CodexAdapter implements ProviderAdapter {
         title: target && target.kind === 'tool' ? `Apply changes to ${target.title}?` : 'Apply these file changes?',
         diff: target && target.kind === 'tool' ? target.diff : undefined,
         detail: params.reason ?? (params.grantRoot ? `Grants write access to ${params.grantRoot}` : undefined),
+        permissionGrant: !!params.grantRoot || undefined,
         canAllowForSession: true
       }
     } else if (method === 'item/permissions/requestApproval') {

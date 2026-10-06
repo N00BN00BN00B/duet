@@ -14,6 +14,7 @@ interface PopoverProps {
   width?: number | 'anchor'
   /** Keep focus where it is (e.g. composer typeahead menus). */
   noFocus?: boolean
+  label?: string
 }
 
 const MARGIN = 8
@@ -52,7 +53,7 @@ function compute(anchor: DOMRect, pop: DOMRect, placement: Placement, offset: nu
   return { top, left, flipped }
 }
 
-export function Popover({ anchor, open, onClose, placement = 'bottom-start', offset = 6, children, className = '', width, noFocus }: PopoverProps) {
+export function Popover({ anchor, open, onClose, placement = 'bottom-start', offset = 6, children, className = '', width, noFocus, label }: PopoverProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number; flipped: boolean } | null>(null)
 
@@ -91,12 +92,6 @@ export function Popover({ anchor, open, onClose, placement = 'bottom-start', off
     }
     document.addEventListener('mousedown', onDown, true)
     document.addEventListener('keydown', onKey, true)
-    if (!noFocus) {
-      requestAnimationFrame(() => {
-        const first = ref.current?.querySelector<HTMLElement>('[data-autofocus], [role="menuitem"]:not([aria-disabled="true"]), input, button')
-        first?.focus({ preventScroll: true })
-      })
-    }
     return () => {
       ro.disconnect()
       window.removeEventListener('resize', place)
@@ -104,6 +99,15 @@ export function Popover({ anchor, open, onClose, placement = 'bottom-start', off
       document.removeEventListener('keydown', onKey, true)
     }
   }, [open, place, onClose, anchor, noFocus])
+
+  useEffect(() => {
+    if (!open || noFocus) return
+    const frame = requestAnimationFrame(() => {
+      const first = ref.current?.querySelector<HTMLElement>('[data-autofocus]') ?? ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"]), input, button')
+      first?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [open, noFocus])
 
   if (!open) return null
   const style: CSSProperties = {
@@ -116,7 +120,7 @@ export function Popover({ anchor, open, onClose, placement = 'bottom-start', off
     transformOrigin: pos?.flipped || placement.startsWith('top') ? 'bottom center' : 'top center'
   }
   return createPortal(
-    <div ref={ref} style={style} className={`anim-pop rounded-xl border border-line-strong bg-surface text-fg shadow-[var(--pop-shadow)] ${className}`} role="dialog">
+    <div ref={ref} style={style} className={`anim-pop rounded-xl border border-line-strong bg-surface text-fg shadow-[var(--pop-shadow)] ${className}`} role="dialog" aria-label={label}>
       {children}
     </div>,
     document.body

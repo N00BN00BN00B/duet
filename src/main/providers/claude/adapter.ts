@@ -251,7 +251,7 @@ class ClaudeSession {
         }
       }
       this.approvals.set(itemId, { requestId: msg.request_id, toolUseId: req.tool_use_id, toolName: req.tool_name, input: req.input ?? {}, suggestions })
-      this.emit({ type: 'item', item: { kind: 'approval', id: itemId, ts: Date.now(), provider: 'claude', status: 'pending', ...shape } })
+      this.emit({ type: 'item', item: { kind: 'approval', id: itemId, ts: Date.now(), provider: 'claude', status: 'pending', ...shape, permissionGrant: !!req.blocked_path || undefined } })
       return
     }
     if (req.subtype === 'elicitation') {
