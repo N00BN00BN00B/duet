@@ -68,6 +68,8 @@ test.describe('slider regression checks', () => {
     expect(Math.abs(knobBox.x + knobBox.width / 2 - x)).toBeLessThan(2)
     await page.mouse.up()
     await expect(page.getByTestId('effort-menu')).toContainText('High')
+    const after = (await slider.boundingBox())!
+    expect(Math.abs(after.y - box.y)).toBeLessThan(1)
     await slider.press('ArrowLeft')
     await expect(page.getByTestId('effort-menu')).toContainText('Medium')
     await expect(page.getByTestId('effort-popover').getByText('Medium', { exact: true })).toBeVisible()

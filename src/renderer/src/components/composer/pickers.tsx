@@ -390,7 +390,7 @@ export function EffortMenu({
             autoFocus
             testId="effort-slider"
           />
-          <div className="mt-2 min-h-[2.6em] text-[12px] leading-snug text-fg-2">
+          <div className="mt-2 h-[4.2em] overflow-y-auto text-[12px] leading-snug text-fg-2">
             {shown ? (hints?.[shown] ?? EFFORT_HINT[shown] ?? '') : `Lets the model decide${defaultEffort ? ` — usually ${name(defaultEffort)}` : ''}. Drag to choose a level.`}
           </div>
         </div>
