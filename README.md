@@ -7,6 +7,18 @@
 <p align="center"><b>Claude Code and Codex in one window.</b><br/>Start with either agent, switch mid-thread, and the other one picks up exactly where the first left off.</p>
 
 <p align="center">
+  <a href="https://github.com/N00BN00BN00B/duet/releases/latest/download/Duet-mac-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Apple_Silicon-111111?style=for-the-badge&logo=apple&logoColor=white" alt="Download Duet for macOS (Apple Silicon)" height="44" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/N00BN00BN00B/duet/releases/latest"><img src="https://img.shields.io/github/v/release/N00BN00BN00B/duet?style=flat-square&label=latest&color=d97757" alt="Latest release" /></a>
+  <a href="https://github.com/N00BN00BN00B/duet/releases"><img src="https://img.shields.io/github/downloads/N00BN00BN00B/duet/total?style=flat-square&color=7c8cf8" alt="Total downloads" /></a>
+  <a href="https://github.com/N00BN00BN00B/duet/stargazers"><img src="https://img.shields.io/github/stars/N00BN00BN00B/duet?style=flat-square&color=f5c542" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-555?style=flat-square&logo=apple" alt="macOS 13 or later" />
+  <img src="https://img.shields.io/badge/Electron-44-47848f?style=flat-square&logo=electron&logoColor=white" alt="Electron 44" />
+</p>
+
+<p align="center">
   <img src="docs/screenshots/switch.png" alt="Switching from Claude to Codex in the same thread" width="860" />
 </p>
 
@@ -69,7 +81,7 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 
 ## Requirements
 
-- macOS on Apple Silicon.
+- macOS 13 or later on Apple Silicon.
 - **Claude Code** (`claude`), signed in — `curl -fsSL https://claude.ai/install.sh | bash`, then `claude auth login`.
 - **Codex** (`codex`), signed in — `npm i -g @openai/codex`, then `codex login`. Duet also finds the Codex CLI bundled inside the ChatGPT app.
 
@@ -77,7 +89,11 @@ Duet auto-detects both from your shell `PATH` and common install locations; you 
 
 ## Install
 
-Open `release/Duet-2.0.0-arm64.dmg` and drag **Duet** to Applications (or unzip `Duet-2.0.0-arm64-mac.zip`). The build is ad-hoc signed; if macOS blocks the first launch, right-click the app and choose **Open**.
+1. **[Download Duet for macOS](https://github.com/N00BN00BN00B/duet/releases/latest/download/Duet-mac-arm64.dmg)** (Apple Silicon), or pick a version on the [releases page](https://github.com/N00BN00BN00B/duet/releases).
+2. Open the DMG and drag **Duet** to **Applications**.
+3. First launch: Duet isn't notarized by Apple yet, so macOS asks before opening it. Open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. (Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Duet.app`.)
+
+Onboarding then checks for Claude Code and Codex and helps you sign in to whichever is missing.
 
 To use Duet from the terminal, open **Settings → Command line → Install** (it adds a small `duet` script to a folder on your `PATH`, such as `/opt/homebrew/bin` or `~/.local/bin`). Then:
 

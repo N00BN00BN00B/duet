@@ -36,12 +36,12 @@ export class FakeAdapter implements ProviderAdapter {
     const models =
       this.id === 'claude'
         ? [
-            { id: 'fake-opus', label: 'Opus (demo)', efforts: ['low', 'medium', 'high', 'max'], isDefault: true, supportsImages: true },
-            { id: 'fake-haiku', label: 'Haiku (demo)', supportsImages: true }
+            { id: 'fake-opus', label: 'Opus (demo)', description: 'Best for everyday, complex tasks', efforts: ['low', 'medium', 'high', 'max'], isDefault: true, supportsImages: true },
+            { id: 'fake-haiku', label: 'Haiku (demo)', description: 'Fastest for quick answers', supportsImages: true }
           ]
         : [
-            { id: 'fake-gpt', label: 'GPT (demo)', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', isDefault: true, supportsImages: true },
-            { id: 'fake-gpt-mini', label: 'GPT mini (demo)', efforts: ['low', 'medium'], supportsImages: true }
+            { id: 'fake-gpt', label: 'GPT (demo)', description: 'Latest workhorse model for coding and everyday work.', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', isDefault: true, supportsImages: true },
+            { id: 'fake-gpt-mini', label: 'GPT mini (demo)', description: 'Fast and affordable model for easier tasks.', efforts: ['low', 'medium'], supportsImages: true }
           ]
     return {
       id: this.id,

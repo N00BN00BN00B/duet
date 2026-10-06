@@ -21,6 +21,8 @@ import { CodexAdapter } from '../../src/main/providers/codex/adapter'
 import { ClaudeAdapter } from '../../src/main/providers/claude/adapter'
 import { ClaudeMapper } from '../../src/main/providers/claude/mapper'
 import { agentCommands, parseCommand, rankCommands, reviewTarget, DUET_COMMANDS } from '../../src/renderer/src/lib/commands'
+import { ladderIndex, modelLadder, modelTier, shortModelName } from '../../src/renderer/src/lib/models'
+import { buildBlocks, summarize } from '../../src/renderer/src/lib/timeline'
 
 const tmp = (name: string) => mkdtempSync(join(tmpdir(), `duet2-${name}-`))
 const fixture = (name: string) => resolve(__dirname, '../fixtures', name)
@@ -408,6 +410,62 @@ describe('commands', () => {
     const ranked = rankCommands([...DUET_COMMANDS, ...claude], 'com')
     expect(ranked[0].name).toBe('compact')
     expect(rankCommands(DUET_COMMANDS, 'zzz')).toEqual([])
+  })
+})
+
+describe('model slider', () => {
+  // What Claude Code and Codex actually report on this Mac (2026-10-06).
+  const claude = [
+    { id: 'default', label: 'Default', description: 'Opus 5.5 · Best for everyday, complex tasks', isDefault: true },
+    { id: 'opus', label: 'Opus 5.5', description: 'Best for everyday, complex tasks' },
+    { id: 'fable', label: 'Fable 5.1', description: 'Most capable for your hardest and longest-running tasks' },
+    { id: 'sonnet', label: 'Sonnet 5.5', description: 'Efficient for routine tasks' },
+    { id: 'haiku', label: 'Haiku 4.5', description: 'Fastest for quick answers' },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Efficient for routine tasks' },
+    { id: 'claude-opus-4-7', label: 'Opus 4.7', description: 'Best for everyday, complex tasks' }
+  ]
+  const codex = [
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', description: 'Latest workhorse model for coding and everyday work.', isDefault: true },
+    { id: 'gpt-6-astra', label: 'GPT-6-Astra', description: 'Frontier intelligence for the most demanding work.' },
+    { id: 'gpt-6-sol', label: 'GPT-6-Sol', description: 'Previous generation workhorse model.' },
+    { id: 'gpt-6-luna', label: 'GPT-6-Luna', description: 'Fast and affordable model for easier tasks.' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6-Terra', description: 'Older balanced model for straightforward work.' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6-Luna', description: 'Older fast and efficient model.' }
+  ]
+
+  it('orders each agent\'s families from fastest to most capable, newest of each', () => {
+    const c = modelLadder(claude)
+    expect(c.stops.map((m) => m.id)).toEqual(['haiku', 'sonnet', 'opus', 'fable'])
+    expect(c.recommended).toBe(2) // Claude's Default is Opus 5.5
+    const x = modelLadder(codex)
+    expect(x.stops.map((m) => m.id)).toEqual(['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']) // older generations stay in the list only
+    expect(x.recommended).toBe(1)
+    expect(x.stops.map((m) => shortModelName(m.label))).toEqual(['Luna', 'Sol', 'Astra'])
+    expect(shortModelName('Opus 5.5')).toBe('Opus')
+  })
+
+  it('places a model that isn\'t a stop on its family, and skips the slider when there is nothing to compare', () => {
+    const { stops } = modelLadder(claude)
+    expect(ladderIndex(stops, claude.find((m) => m.id === 'claude-opus-4-7'))).toEqual({ index: 2, exact: false })
+    expect(ladderIndex(stops, claude.find((m) => m.id === 'haiku'))).toEqual({ index: 0, exact: true })
+    expect(modelLadder([{ id: 'x', label: 'Mystery' }, { id: 'y', label: 'Other' }]).stops).toEqual([])
+    expect(modelTier({ id: 'gpt-5-nano', label: 'nano' })).toBe(0)
+  })
+})
+
+describe('work log', () => {
+  const tool = (id: string, title: string): TimelineItem => ({ kind: 'tool', id, ts: 1, provider: 'codex', tool: 'read', title, status: 'done' }) as TimelineItem
+  const approval = (id: string, status: string, request = 'command'): TimelineItem => ({ kind: 'approval', id, ts: 1, provider: 'codex', request, title: 'Run this command?', command: 'cat x', status, canAllowForSession: true }) as TimelineItem
+
+  it('approved requests fold into the steps instead of splitting them; declined ones stay visible', () => {
+    const items = [tool('t1', 'a.md'), approval('a1', 'approved-session'), tool('t2', 'b.md'), approval('a2', 'approved'), tool('t3', 'c.md'), approval('a3', 'denied'), tool('t4', 'd.md')]
+    const blocks = buildBlocks(items)
+    expect(blocks.map((b) => b.type)).toEqual(['work', 'item', 'work'])
+    const first = blocks[0]
+    expect(first.type === 'work' && summarize(first.entries)).toBe('Read 3 files')
+    expect(blocks[1].type === 'item' && blocks[1].item.id).toBe('a3')
+    // Questions and plans are part of the conversation, so they always show.
+    expect(buildBlocks([approval('q', 'approved', 'question'), approval('p', 'approved', 'plan')]).length).toBe(2)
   })
 })
 

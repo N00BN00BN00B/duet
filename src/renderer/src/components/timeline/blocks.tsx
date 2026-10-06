@@ -391,8 +391,8 @@ export const ApprovalRecord = memo(function ApprovalRecord({ item }: { item: App
   const subject = item.command ?? item.title
   return (
     <div className="flex min-w-0 items-center gap-2 py-0.5 text-[12px]">
-      <span className={`flex h-5 w-5 items-center justify-center ${tone}`}>{pending ? <IconShield size={13} className="breathe" /> : <IconShield size={13} />}</span>
-      <span className={tone}>{verb}</span>
+      <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${tone}`}>{pending ? <IconShield size={13} className="breathe" /> : <IconShield size={13} />}</span>
+      <span className={`shrink-0 whitespace-nowrap ${tone}`}>{verb}</span>
       <span className="min-w-0 truncate font-mono text-[11.5px] text-fg-3">{subject}</span>
       {item.answers && (
         <span className="min-w-0 truncate text-fg-2">

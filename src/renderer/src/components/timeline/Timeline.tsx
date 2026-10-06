@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ProviderId, ThreadMeta, TimelineItem } from '@shared/types'
-import { buildBlocks, type Block } from '@/lib/timeline'
+import { buildBlocks, isSettledApproval, type Block } from '@/lib/timeline'
 import { useApp } from '@/state/store'
 import { IconArrowRight } from '../icons'
 import { AgentHeader, ApprovalRecord, AssistantMessage, Notice, SwitchDivider, ThinkingIndicator, TurnFooter, UserMessage, WorkGroup } from './blocks'
@@ -18,7 +18,11 @@ export function Timeline({ meta, items }: { meta: ThreadMeta; items: TimelineIte
     return -1
   }, [items])
   const turnProvider = lastUserIndex >= 0 && items[lastUserIndex].kind === 'user' ? (items[lastUserIndex] as { provider: ProviderId }).provider : meta.provider
-  const tail = items[items.length - 1]
+  // Approvals that went through aren't shown, so they don't count as what's on screen last.
+  const tail = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) if (!isSettledApproval(items[i])) return items[i]
+    return undefined
+  }, [items])
   const showThinking = meta.status === 'running' && (!tail || tail.kind === 'user' || tail.kind === 'switch' || tail.kind === 'notice' || (tail.kind === 'assistant' && !tail.streaming) || tail.kind === 'approval')
 
   const scrollToBottom = useCallback((smooth = false) => {

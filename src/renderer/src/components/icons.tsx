@@ -218,6 +218,12 @@ export const IconInfo = (p: IconProps) => (
     <path d="M12 11v5M12 7.8h.01" />
   </Svg>
 )
+export const IconHelp = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M9.6 9.4a2.5 2.5 0 0 1 4.85.85c0 1.65-2.45 2.2-2.45 3.6M12 16.6h.01" />
+  </Svg>
+)
 export const IconBranch = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="7" cy="5.5" r="2" />

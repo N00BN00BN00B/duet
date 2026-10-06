@@ -164,12 +164,54 @@ test.describe.serial('Duet 2: look, commands, sync, usage, command line', () => 
     await expect(page.getByTestId('send-button')).toBeVisible({ timeout: 20_000 })
   })
 
-  test('effort meter and model cards', async () => {
+  test('effort and model sliders: drag, click and keys', async () => {
     const { page } = ctx
-    await page.getByTestId('effort-menu').click()
-    await page.getByTestId('effort-high').click()
-    await expect(page.getByTestId('effort-menu')).toContainText('High')
-    await page.getByTestId('model-menu').click()
+    /** Where stop `i` of `n` sits on a slider track (the knob's centre runs 14px in from each end). */
+    const stopX = async (testId: string, i: number, n: number) => {
+      const box = (await page.getByTestId(testId).getByRole('slider').boundingBox())!
+      return { x: box.x + 14 + (i / (n - 1)) * (box.width - 28), y: box.y + box.height / 2 }
+    }
+    const button = page.getByTestId('effort-menu')
+    await button.click()
+    const slider = page.getByTestId('effort-slider').getByRole('slider')
+    await expect(slider).toBeFocused()
+    await expect(page.getByTestId('effort-popover')).toContainText('Auto')
+    // Keys: End jumps to the top level.
+    await page.keyboard.press('End')
+    await expect(button).toContainText('Max')
+    await expect(slider).toHaveAttribute('aria-valuetext', 'Max')
+    // Drag the knob from Max down to High (demo Opus: low, medium, high, max).
+    const from = await stopX('effort-slider', 3, 4)
+    const to = await stopX('effort-slider', 2, 4)
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 4 })
+    await expect(page.getByTestId('effort-popover')).toContainText('High') // previewed while dragging
+    await page.mouse.move(to.x + 3, to.y, { steps: 4 })
+    await page.mouse.up()
+    await expect(button).toContainText('High')
+    await shot(page, '25-effort')
+    // A click lands on the nearest stop; Auto hands the choice back to the model.
+    const low = await stopX('effort-slider', 0, 4)
+    await page.mouse.click(low.x + 4, low.y)
+    await expect(button).toContainText('Low')
+    await page.getByTestId('effort-auto').click()
+    await expect(button).toContainText('Auto')
+    await expect(slider).toHaveAttribute('aria-valuetext', /automatic/)
+    await page.keyboard.press('Escape')
+
+    const models = page.getByTestId('model-menu')
+    await models.click()
+    await expect(page.getByTestId('model-ladder')).toContainText('Faster')
+    await expect(page.getByTestId('model-slider')).toContainText('Haiku')
+    await expect(page.getByTestId('model-slider-recommended')).toBeVisible()
+    const haiku = await stopX('model-slider', 0, 2)
+    await page.mouse.click(haiku.x, haiku.y)
+    await expect(models).toContainText('Haiku (demo)')
+    await shot(page, '26-models')
+    const opus = await stopX('model-slider', 1, 2)
+    await page.mouse.click(opus.x, opus.y)
+    await expect(models).toContainText('Opus (demo)')
     await expect(page.getByTestId('model-option')).toHaveCount(4)
     await expect(page.getByTestId('model-option').first()).toContainText('Smarts')
     await page.keyboard.press('Escape')

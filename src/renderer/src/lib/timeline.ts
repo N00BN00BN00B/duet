@@ -6,6 +6,15 @@ export type Block =
   | { type: 'item'; key: string; item: TimelineItem; showHeader?: boolean }
   | { type: 'work'; key: string; entries: WorkEntry[]; provider: ProviderId; showHeader: boolean; last: boolean }
 
+/**
+ * A command, edit or tool use that was approved (once or for the whole chat) adds nothing the step
+ * itself doesn't show; as a row of its own it would only split the work log into one line per step.
+ * Declined, expired and still-pending requests, questions and plans stay visible.
+ */
+export function isSettledApproval(item: TimelineItem): boolean {
+  return item.kind === 'approval' && item.request !== 'question' && item.request !== 'plan' && (item.status === 'approved' || item.status === 'approved-session')
+}
+
 /** Folds consecutive tool/reasoning items into work groups and decides where agent headers go. */
 export function buildBlocks(items: TimelineItem[]): Block[] {
   const blocks: Block[] = []
@@ -25,6 +34,7 @@ export function buildBlocks(items: TimelineItem[]): Block[] {
       work.push(item)
       continue
     }
+    if (isSettledApproval(item)) continue
     flush()
     if (item.kind === 'user' || item.kind === 'switch') {
       headerShownForTurn = false

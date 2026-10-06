@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { AccessMode, ModelOption, ProviderId, ProviderStatus } from '@shared/types'
 import { ACCESS_MODES, PROVIDER_LABEL, PROVIDERS } from '@shared/types'
 import { ProviderLogo } from '../brand'
-import { IconCheck, IconChevronDown, IconHand, IconMap, IconPencil, IconSearch, IconUnlock } from '../icons'
+import { ladderIndex, modelLadder, modelTier, shortModelName } from '@/lib/models'
+import { IconCheck, IconChevronDown, IconHand, IconHelp, IconMap, IconPencil, IconSearch, IconUnlock } from '../icons'
 import { MenuLabel, MenuSeparator, Popover, useMenuKeys } from '../ui/Popover'
 import { Tooltip } from '../ui/primitives'
+import { StepSlider } from '../ui/StepSlider'
 
 export function ProviderSwitch({ value, onChange, statuses, disabled }: { value: ProviderId; onChange: (p: ProviderId) => void; statuses: Partial<Record<ProviderId, ProviderStatus>>; disabled?: boolean }) {
   const idx = PROVIDERS.indexOf(value)
@@ -69,8 +71,14 @@ export function modelLabel(models: ModelOption[], id: string | undefined): strin
   return models.find((m) => m.id === id)?.label ?? id
 }
 
-/** Rough "smarts" and "speed" (1–5) from a model's name, for an at-a-glance comparison. */
-export function modelTraits(m: Pick<ModelOption, 'id' | 'label'>): { smarts: number; speed: number; tag?: string } {
+const TIER_TAG = ['Fastest', 'Fast', 'Efficient', 'Everyday', 'Most capable']
+
+/** Rough "smarts" and "speed" (1–5), for an at-a-glance comparison: from how the agent describes the model, else its name. */
+export function modelTraits(m: Pick<ModelOption, 'id' | 'label' | 'description'>): { smarts: number; speed: number; tag?: string } {
+  if (m.description && !/\bdefault\b/i.test(m.id)) {
+    const tier = modelTier({ ...m, id: '', label: '' })
+    if (tier !== undefined) return { smarts: tier + 1, speed: 5 - tier, tag: TIER_TAG[tier] }
+  }
   const name = `${m.id} ${m.label}`.toLowerCase()
   if (/\bdefault\b/.test(name) && !/opus|sonnet|haiku|gpt|o\d/.test(name)) return { smarts: 4, speed: 3, tag: 'Recommended' }
   if (/nano/.test(name)) return { smarts: 2, speed: 5, tag: 'Fastest' }
@@ -81,6 +89,26 @@ export function modelTraits(m: Pick<ModelOption, 'id' | 'label'>): { smarts: num
   if (/sonnet/.test(name)) return { smarts: 4, speed: 4, tag: 'Balanced' }
   if (/gpt-5|gpt5|o3|o4/.test(name)) return { smarts: 4, speed: 3 }
   return { smarts: 3, speed: 3 }
+}
+
+/** "Effort  High  (?)" — the popover title with the chosen (or previewed) value. */
+function SliderHeader({ title, value, previewing, help, children }: { title: string; value: string; previewing: boolean; help: string; children?: ReactNode }) {
+  return (
+    <div className="mb-3 flex items-center gap-2">
+      <span className="text-[13px] text-fg-2">{title}</span>
+      <span key={value} className={`anim-fade min-w-0 truncate text-[13px] font-medium transition-opacity duration-150 ${previewing ? 'text-accent/75' : 'text-accent'}`}>
+        {value}
+      </span>
+      <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        {children}
+        <Tooltip label={<span className="block max-w-[220px] leading-snug">{help}</span>}>
+          <span className="flex h-6 w-6 items-center justify-center rounded-full text-fg-3 hover:text-fg-2" tabIndex={-1}>
+            <IconHelp size={15} />
+          </span>
+        </Tooltip>
+      </span>
+    </div>
+  )
 }
 
 function Dots({ value, label }: { value: number; label: string }) {
@@ -154,9 +182,14 @@ export function ModelMenu({
     if (openSignal) setOpen(true)
   }, [openSignal])
   const [query, setQuery] = useState('')
+  const [preview, setPreview] = useState<number | null>(null)
   const anchor = useRef<HTMLDivElement>(null)
   const keys = useMenuKeys()
   const models = statuses[provider]?.models ?? []
+  const ladder = useMemo(() => modelLadder(models), [models])
+  // Where the knob goes: on the chosen model, or hollow on its family (e.g. "Default", an older Opus).
+  const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault)
+  const place = ladderIndex(ladder.stops, chosen?.id === 'default' ? undefined : chosen)
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
     const order: ProviderId[] = [provider, ...PROVIDERS.filter((p) => p !== provider)]
@@ -169,7 +202,33 @@ export function ModelMenu({
       </PickerButton>
       <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={360}>
         <div onKeyDown={keys} className="p-1.5">
-          <div className="mb-1.5 flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-2 focus-within:border-line-strong">
+          {ladder.stops.length > 1 && (
+            <>
+              <div className="px-2.5 pb-2 pt-2" data-testid="model-ladder">
+                <SliderHeader
+                  title="Model"
+                  value={preview !== null ? ladder.stops[preview].label : chosen?.id === 'default' && chosen.description?.includes(' · ') ? `Default · ${chosen.description.split(' · ')[0]}` : modelLabel(models, model)}
+                  previewing={preview !== null}
+                  help={`${PROVIDER_LABEL[provider]}'s model families, from quickest to most capable. Exact versions and the other agent's models are in the list below.`}
+                />
+                <StepSlider
+                  stops={ladder.stops.map((m) => ({ id: m.id, label: m.label, short: shortModelName(m.label) }))}
+                  value={place?.exact ? place.index : null}
+                  rest={place?.index}
+                  recommended={ladder.recommended}
+                  onCommit={(i) => onPick(provider, ladder.stops[i].id)}
+                  onPreview={setPreview}
+                  label="Model"
+                  minLabel="Faster"
+                  maxLabel="Smarter"
+                  showLabels
+                  testId="model-slider"
+                />
+              </div>
+              <MenuSeparator />
+            </>
+          )}
+          <div className="mb-1.5 mt-1 flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-2 focus-within:border-line-strong">
             <IconSearch size={13} className="text-fg-3" />
             <input
               data-autofocus
@@ -261,69 +320,59 @@ export function EffortMenu({
   openSignal?: number
 }) {
   const [open, setOpen] = useState(false)
-  const [hover, setHover] = useState<string | null>(null)
+  const [preview, setPreview] = useState<number | null>(null)
   const anchor = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (openSignal) setOpen(true)
   }, [openSignal])
+  useEffect(() => {
+    if (!open) setPreview(null)
+  }, [open])
   if (!efforts.length) return null
   const current = value && efforts.includes(value) ? value : undefined
-  const levels = ['auto', ...efforts]
-  const shown = hover ?? current ?? 'auto'
-  // Hovering previews a level: the bars light up to it before you click.
-  const litTo = shown === 'auto' ? 0 : levels.indexOf(shown)
+  const recommended = defaultEffort && efforts.includes(defaultEffort) ? efforts.indexOf(defaultEffort) : undefined
+  const shown = preview !== null ? efforts[preview] : current
+  const name = (level: string) => EFFORT_LABEL[level] ?? level
   const idx = current ? efforts.indexOf(current) + 1 : efforts.indexOf(defaultEffort ?? '') + 1
-  const pick = (level: string) => {
-    onPick(level === 'auto' ? undefined : level)
-    setOpen(false)
-  }
   return (
     <div ref={anchor}>
       <PickerButton open={open} onClick={() => setOpen((v) => !v)} label="Reasoning effort" testId="effort-menu">
         <EffortBars level={idx} of={efforts.length} className={current ? 'text-accent' : 'text-fg-3'} />
-        <span className="hidden @[600px]/composer:inline">{current ? (EFFORT_LABEL[current] ?? current) : 'Auto'}</span>
+        <span className="hidden @[600px]/composer:inline">{current ? name(current) : 'Auto'}</span>
       </PickerButton>
-      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={Math.max(300, levels.length * 56 + 24)}>
-        <div className="p-3" role="radiogroup" aria-label="Reasoning effort">
-          <div className="mb-3 text-[11px] font-medium text-fg-3">Reasoning effort</div>
-          <div className="flex items-end gap-1.5" onMouseLeave={() => setHover(null)}>
-            {levels.map((level, i) => {
-              const selected = (current ?? 'auto') === level
-              const lit = level === 'auto' ? shown === 'auto' : i <= litTo
-              return (
-                <button
-                  key={level}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  onMouseEnter={() => setHover(level)}
-                  onFocus={() => setHover(level)}
-                  onClick={() => pick(level)}
-                  onKeyDown={(e) => {
-                    const next = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : -1
-                    if (next >= 0 && next < levels.length) {
-                      e.preventDefault()
-                      ;(e.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus()
-                    }
-                  }}
-                  data-testid={`effort-${level}`}
-                  className="group/eff flex flex-1 flex-col items-center gap-1.5 rounded-lg px-1 pb-1.5 pt-2 outline-none transition-colors hover:bg-hover focus-visible:bg-hover"
-                >
-                  <span className="flex h-16 w-full items-end justify-center">
-                    <span
-                      className={`w-3 rounded-full transition-[background-color,box-shadow,transform] duration-200 ease-[var(--ease-out)] ${
-                        level === 'auto' ? (lit ? 'border-2 border-dashed border-accent bg-accent/10' : 'border-2 border-dashed border-line-strong') : lit ? 'bg-accent' : 'bg-surface-3'
-                      } ${selected && level !== 'auto' ? 'shadow-[0_0_16px_-1px_var(--accent)]' : ''} ${hover === level ? 'scale-x-125' : ''}`}
-                      style={{ height: level === 'auto' ? '40%' : `${30 + (i / Math.max(1, levels.length - 1)) * 70}%` }}
-                    />
-                  </span>
-                  <span className={`text-[11px] ${selected ? 'font-semibold text-fg' : 'text-fg-3 group-hover/eff:text-fg-2'}`}>{level === 'auto' ? 'Auto' : (EFFORT_LABEL[level] ?? level)}</span>
-                </button>
-              )
-            })}
-          </div>
-          <div className="mt-2 min-h-[2.4em] text-[12px] leading-snug text-fg-2">
-            {shown === 'auto' ? `Lets the model decide${defaultEffort ? ` (usually ${EFFORT_LABEL[defaultEffort] ?? defaultEffort})` : ''}.` : (hints?.[shown] ?? EFFORT_HINT[shown] ?? '')}
+      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} placement="top-start" width={320} noFocus>
+        <div className="p-3.5 pb-3" data-testid="effort-popover">
+          <SliderHeader
+            title="Effort"
+            value={shown ? name(shown) : 'Auto'}
+            previewing={preview !== null}
+            help="How long the agent thinks before it answers. More effort is smarter but slower, and uses more of your limits."
+          >
+            <button
+              type="button"
+              aria-pressed={!current}
+              onClick={() => onPick(undefined)}
+              data-testid="effort-auto"
+              className={`press rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${!current ? 'bg-accent/15 text-accent ring-1 ring-accent/30' : 'text-fg-3 ring-1 ring-line hover:text-fg-2'}`}
+            >
+              Auto
+            </button>
+          </SliderHeader>
+          <StepSlider
+            stops={efforts.map((e) => ({ id: e, label: name(e) }))}
+            value={current ? efforts.indexOf(current) : null}
+            rest={recommended}
+            recommended={recommended}
+            onCommit={(i) => onPick(efforts[i])}
+            onPreview={setPreview}
+            label="Reasoning effort"
+            minLabel="Faster"
+            maxLabel="Smarter"
+            autoFocus
+            testId="effort-slider"
+          />
+          <div className="mt-2 min-h-[2.6em] text-[12px] leading-snug text-fg-2">
+            {shown ? (hints?.[shown] ?? EFFORT_HINT[shown] ?? '') : `Lets the model decide${defaultEffort ? ` — usually ${name(defaultEffort)}` : ''}. Drag to choose a level.`}
           </div>
         </div>
       </Popover>
