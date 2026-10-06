@@ -2,6 +2,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { Settings, Thread, ThreadMeta, TimelineItem } from '@shared/types'
+import { DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, normalizeTheme, type ThemeSpec } from '@shared/theme'
+
+const MAX_CACHED_THREADS = 8
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
@@ -20,7 +23,21 @@ export const DEFAULT_SETTINGS: Settings = {
   includeAuthInBackups: false,
   fontSize: 14,
   browserHome: 'http://localhost:3000',
-  onboarded: false
+  onboarded: false,
+  darkTheme: DEFAULT_DARK_THEME,
+  lightTheme: DEFAULT_LIGHT_THEME,
+  customThemes: [],
+  accentMode: 'agent',
+  accentColor: '#d97757',
+  density: 'comfortable',
+  chatWidth: 'normal',
+  reduceMotion: false,
+  backgroundEffects: true,
+  sidebarAgentNames: true,
+  showTurnDetails: true,
+  personality: { preset: 'default', custom: '', providers: ['claude', 'codex'] },
+  chatSync: 'off',
+  usageIncludeOutside: true
 }
 
 /** Writes via a temp file + rename so a crash never leaves a half-written file. */
@@ -88,6 +105,10 @@ export class Store {
   private protectedIds = new Set<string>()
   /** Set while a backup of Duet's own data is restored: nothing may be written over it. */
   private frozen = false
+  /** Threads whose messages are in memory, least recently used first. */
+  private recent: string[] = []
+  /** Threads that must stay in memory (an agent is working in them). */
+  isBusy: (id: string) => boolean = () => false
 
   constructor(root: string) {
     this.root = root
@@ -99,7 +120,15 @@ export class Store {
     const read = readJsonFile<Partial<Settings>>(this.settingsPath)
     if (!read.ok && read.reason === 'corrupt') setAside(this.settingsPath)
     const saved = read.ok && read.value && typeof read.value === 'object' ? read.value : {}
-    this.settings = { ...DEFAULT_SETTINGS, ...saved, defaultModels: { ...saved.defaultModels }, defaultEfforts: { ...saved.defaultEfforts } }
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      ...saved,
+      defaultModels: { ...saved.defaultModels },
+      defaultEfforts: { ...saved.defaultEfforts },
+      personality: { ...DEFAULT_SETTINGS.personality, ...(saved.personality ?? {}) },
+      // Saved themes are re-checked on load, so a hand-edited settings file can't break the UI.
+      customThemes: (Array.isArray(saved.customThemes) ? saved.customThemes : []).map((t) => normalizeTheme(t)).filter((t): t is ThemeSpec => !!t)
+    }
     this.loadIndex()
   }
 
@@ -108,7 +137,8 @@ export class Store {
     const files = new Set(readdirSync(this.threadsDir).filter((f) => f.endsWith('.json') && f !== 'index.json').map((f) => f.slice(0, -5)))
     if (Array.isArray(index)) {
       for (const meta of index) {
-        if (meta && typeof meta.id === 'string' && files.has(meta.id)) this.metas.set(meta.id, meta)
+        // Synced chats that were never opened have no file yet.
+        if (meta && typeof meta.id === 'string' && (files.has(meta.id) || meta.lazy)) this.metas.set(meta.id, meta)
       }
     }
     // Recover threads missing from the index (e.g. crash between writes).
@@ -184,7 +214,39 @@ export class Store {
       }
       this.items.set(id, items)
     }
+    this.used(id)
     return items
+  }
+
+  /** Keeps only a handful of threads' messages in memory; the rest are re-read from disk. */
+  private used(id: string): void {
+    const at = this.recent.indexOf(id)
+    if (at >= 0) this.recent.splice(at, 1)
+    this.recent.push(id)
+    for (let i = 0; this.items.size > MAX_CACHED_THREADS && i < this.recent.length; ) {
+      const old = this.recent[i]
+      if (old === id || this.dirty.has(old) || this.isBusy(old)) {
+        i++
+        continue
+      }
+      this.items.delete(old)
+      this.recent.splice(i, 1)
+    }
+  }
+
+  /** Adds or replaces many metas at once (chat sync) with a single write. */
+  putMetas(metas: ThreadMeta[]): void {
+    for (const meta of metas) {
+      this.metas.set(meta.id, meta)
+      if (meta.lazy) {
+        // A synced chat is re-read from its source when opened; drop any stale copy.
+        this.items.delete(meta.id)
+        this.dirty.delete(meta.id)
+        if (!this.frozen) rmSync(join(this.threadsDir, `${meta.id}.json`), { force: true })
+      }
+    }
+    this.indexDirty = true
+    this.schedule()
   }
 
   getThread(id: string): Thread | null {
@@ -201,6 +263,7 @@ export class Store {
   setItems(id: string, items: TimelineItem[]): void {
     this.items.set(id, items)
     this.markDirty(id)
+    this.used(id)
   }
 
   markDirty(id: string): void {
@@ -235,7 +298,7 @@ export class Store {
     if (this.frozen) return
     for (const id of this.dirty) {
       const meta = this.metas.get(id)
-      if (!meta || this.protectedIds.has(id)) continue
+      if (!meta || meta.lazy || this.protectedIds.has(id)) continue
       const items = this.items.get(id) ?? []
       try {
         writeFileAtomic(join(this.threadsDir, `${id}.json`), JSON.stringify({ meta, items } satisfies ThreadFile))

@@ -2,7 +2,29 @@
 // Stand-in for `claude` that speaks just enough of the stream-json control protocol for adapter
 // tests: answers control requests, runs a turn per user message, and winds a turn down a little
 // while after an interrupt (like the real CLI does).
+import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+
+// Records each run's arguments (plus the thinking budget it was given, if any) for tests to inspect.
+const thinking = process.env.MAX_THINKING_TOKENS === undefined ? [] : [`env:MAX_THINKING_TOKENS=${process.env.MAX_THINKING_TOKENS}`]
+if (process.env.FAKE_CLAUDE_ARGS_FILE) appendFileSync(process.env.FAKE_CLAUDE_ARGS_FILE, JSON.stringify([...process.argv.slice(2), ...thinking]) + '\n')
+
+if (process.argv[2] === 'auth' && process.argv[3] === 'status') {
+  const loggedIn = process.env.FAKE_CLAUDE_LOGGED_IN === '1'
+  process.stdout.write(JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
+  process.exit(loggedIn ? 0 : 1)
+}
+
+// One-shot: `claude -p --output-format json`, prompt on stdin.
+if (process.argv.includes('-p') && !process.argv.includes('stream-json')) {
+  let prompt = ''
+  process.stdin.on('data', (c) => (prompt += c))
+  process.stdin.on('end', () => {
+    const answer = process.env.FAKE_CLAUDE_ANSWER ?? `echo: ${prompt.slice(0, 40)}`
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: answer, total_cost_usd: 0.001 }))
+    process.exit(0)
+  })
+} else {
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n')
 const arg = (flag) => {
@@ -48,3 +70,4 @@ createInterface({ input: process.stdin })
     }
   })
   .on('close', () => process.exit(0))
+}

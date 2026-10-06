@@ -39,8 +39,17 @@ export const UserMessage = memo(function UserMessage({ item }: { item: UserItem 
           ))}
         </div>
       )}
+      {item.skills && item.skills.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-1.5">
+          {item.skills.map((name) => (
+            <span key={name} className="rounded-full bg-accent/12 px-2 py-0.5 text-[11.5px] text-accent ring-1 ring-accent/25">
+              skill · {name}
+            </span>
+          ))}
+        </div>
+      )}
       {item.text && (
-        <div className="relative max-w-full rounded-[18px] rounded-br-md bg-surface-3 px-3.5 py-2 text-[0.97em] leading-relaxed text-fg">
+        <div className="relative max-w-full rounded-2xl rounded-br-md bg-surface-3 px-3.5 py-2 text-[0.97em] leading-relaxed text-fg">
           <div className={`selectable whitespace-pre-wrap break-words ${long && !expanded ? 'fade-mask-b max-h-[16rem] overflow-hidden' : ''}`}>{item.text}</div>
           {long && (
             <button type="button" onClick={() => setExpanded((v) => !v)} className="press mt-1 text-[12px] font-medium text-fg-2 hover:text-fg">

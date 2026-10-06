@@ -241,7 +241,9 @@ export async function listCodexThreads(request: CodexRequest, max = 400): Promis
   const out: HistoryEntry[] = []
   let cursor: string | null = null
   for (let page = 0; page < 10 && out.length < max; page++) {
-    const res: Json = await request('thread/list', { limit: 100, cursor, sortKey: 'updated_at', sortDirection: 'desc', archived: false }, 30_000)
+    // useStateDbOnly reads Codex's index database instead of scanning every rollout file.
+    const params = { limit: 100, cursor, sortKey: 'updated_at', sortDirection: 'desc', archived: false }
+    const res: Json = await request('thread/list', { ...params, useStateDbOnly: true }, 30_000).catch(() => request('thread/list', params, 30_000))
     for (const t of res?.data ?? []) {
       if (t.parentThreadId || t.ephemeral) continue
       const source = t.source

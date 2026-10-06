@@ -24,9 +24,24 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 - Screenshots and other pictures that tools return (MCP screenshot tools, image viewers, generated images) show right in the conversation — click one for full size.
 - Approvals docked above the composer: run/deny commands, review diffs before edits, approve plans, answer agent questions. <kbd>⌘↵</kbd> allow · <kbd>⇧⌘↵</kbd> always allow · <kbd>Esc</kbd> stop.
 - Images: paste, drag & drop or attach; both agents see them.
-- `/` slash commands and `@` file mentions in the composer.
+- Type `/` for a menu of every command: Duet's own (`/theme`, `/model`, `/effort`, `/plan`, `/fast`, `/usage`, `/sync`, `/export`…), the agent's built-ins, and your custom commands and Codex skills. `@` mentions files.
+- Codex's native features work like they do in Codex: `/review` (uncommitted changes, a branch or a commit), `/compact`, `/init`, skills, and **Fast** mode.
 - Live usage meters for both subscriptions (5-hour / weekly limits) and a context-window meter.
 - Notifications and a dock badge when an agent finishes or needs you.
+
+**Make it yours**
+- **Customize** — 13 themes (Graphite, Paper, Ocean Waves, Aurora, Synthwave, Deep Space…), separate picks for light and dark mode, accent colour (per agent, theme or your own), density, text size, chat width, corner radius, and calm animated backgrounds (gradient, wave, aurora, mesh, glow, grid, stars, grain) that pause when you're idle.
+- **Describe a look** — type *"dark gradient with a wave effect"* in Customize, or `/theme …` in any chat, and Claude or Codex designs it. Agents only ever return colours and an effect from a fixed list, which Duet checks for contrast, so a theme can't break the app. Edit any theme afterwards; Undo is one click.
+- **Personality** — pick how the agents talk to you (concise, friendly, pragmatic, teacher or your own words), or import your Claude Code output style and use it with Codex too.
+
+**Usage**
+- Tokens, cost and activity per day, model and agent, read from Claude Code's and Codex's local logs (in the background, only what changed since last time), plus both subscriptions' limits and your Codex account totals. Choose whether to count work done outside Duet.
+
+**Getting around**
+- Start a chat in any project from the home screen, add a project with **+**, or have a quick chat with no project at all.
+- **Chat sync** puts every Claude Code and Codex chat in the sidebar as *Claude · title* / *Codex · title*, with their real dates. They're only an index entry until you open one, so syncing hundreds of chats costs next to nothing; it keeps itself up to date.
+- A short onboarding for new users that checks both agents and offers to install or sign in to whichever is missing.
+- **`duet` command line** — `duet .` opens the current folder, `duet -p "fix the build"` starts a chat, plus `--codex`, `--model`, `--list` and `--usage`. Install it from Settings.
 
 **Built-in tools**
 - **Browser** — a real Chromium browser panel for your dev server. Click **Pick element** to send an element's HTML, styles and a cropped screenshot straight into your message, or attach a full screenshot.
@@ -39,11 +54,14 @@ Duet is a native-feeling macOS desktop app (Electron/Chromium) that drives the *
 - **MCP servers** — one list showing each server's status in Claude and Codex side by side. Add a server once and install it in either or both, import from JSON, or copy what you have from one agent to the other. Writes go through each agent's own tooling (`claude mcp`, Codex `config/batchWrite`) so your config files keep their formatting.
 - **Sync** — compare and copy instructions (`CLAUDE.md` ⇄ `AGENTS.md`), skills, custom commands/prompts and MCP servers in either direction, or "newest wins". Anything overwritten is saved first.
 - **Backups** — snapshot settings, skills, MCP config and full conversation history of both agents (plus Duet's own threads) into one `.tar.gz`, restore on this or another Mac, optional daily/weekly automatic backups. Restores always take a safety backup first.
+- **Storage** — pictures are stored once however often they appear, unused attachments and old safety copies can be cleaned up from Settings (they go to the Trash), and only recently used chats stay in memory.
 
 ## Screenshots
 
 | | |
 |---|---|
+| ![Home](docs/screenshots/home.png) | ![Commands](docs/screenshots/commands.png) |
+| ![Customize: a theme designed from a sentence](docs/screenshots/customize.png) | ![Usage](docs/screenshots/usage.png) |
 | ![Thread](docs/screenshots/thread.png) | ![Approval](docs/screenshots/approval.png) |
 | ![Panels: browser, changes, terminal](docs/screenshots/panels.png) | ![Light theme](docs/screenshots/light.png) |
 | ![MCP servers](docs/screenshots/mcp.png) | ![Sync](docs/screenshots/sync.png) |
@@ -59,7 +77,13 @@ Duet auto-detects both from your shell `PATH` and common install locations; you 
 
 ## Install
 
-Open `release/Duet-1.0.0-arm64.dmg` and drag **Duet** to Applications (or unzip `Duet-1.0.0-arm64-mac.zip`). The build is ad-hoc signed; if macOS blocks the first launch, right-click the app and choose **Open**.
+Open `release/Duet-2.0.0-arm64.dmg` and drag **Duet** to Applications (or unzip `Duet-2.0.0-arm64-mac.zip`). The build is ad-hoc signed; if macOS blocks the first launch, right-click the app and choose **Open**.
+
+To use Duet from the terminal, open **Settings → Command line → Install** (it adds a small `duet` script to a folder on your `PATH`, such as `/opt/homebrew/bin` or `~/.local/bin`). Then:
+
+```bash
+duet ~/Projects/my-app -p "add a dark mode toggle"
+```
 
 ## Develop
 
@@ -85,7 +109,7 @@ Every Duet thread stores its own timeline plus, per agent, the id of that agent'
 
 ## Where your data lives
 
-- Duet: `~/Library/Application Support/Duet` (threads, attachments, settings).
+- Duet: `~/Library/Application Support/Duet` (threads, attachments, settings, the usage cache).
 - Claude Code: `~/.claude`, `~/.claude.json`. Codex: `~/.codex`.
 - Backups default to `~/Documents/Duet Backups`; change it in **Backups**.
 
@@ -101,14 +125,15 @@ src/
     providers/fake      deterministic demo agents for tests
     orchestrator.ts     threads, turns, approvals, hand-offs, persistence
     handoff.ts          budgeted transcript for agent switches
-    features/           mcp, sync, backup, history, git, files, terminal, attachments
+    features/           mcp, sync, backup, history, chat sync, usage (worker thread), themes,
+                        personality, storage, cli, deep links, git, files, terminal
   preload/              contextBridge API (typed by src/shared/api.ts)
   renderer/             React 19 + Tailwind 4 UI
-  shared/               types, diff engine, path helpers
+  shared/               types, theme engine, personalities, diff engine, path helpers
 tests/
   unit/                 vitest
   e2e/                  Playwright + Electron (demo agents)
   live/                 real CLIs (opt-in)
 ```
 
-Security: the window runs sandboxed with context isolation, every IPC call is checked against the main window, the embedded browser runs in its own sandboxed partition without preload access, and local images are served through a read-only, image-only protocol.
+Security: the window runs sandboxed with context isolation, every IPC call is checked against the main window, the embedded browser runs in its own sandboxed partition without preload access, and local images are served through a read-only, image-only protocol. Themes are data, never code. `duet://` links from anywhere else can only fill in a draft; sending a prompt straight away needs a private token from Duet's data folder, which the `duet` command reads.

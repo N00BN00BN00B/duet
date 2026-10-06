@@ -421,3 +421,50 @@ export function Spinner({ size = 14, className = '' }: { size?: number; classNam
     </svg>
   )
 }
+export const IconPalette = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.1 0 1.7-.8 1.7-1.6 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.7-1.6 1.6-1.6h1.9a4.3 4.3 0 0 0 4.3-4.3c0-3.9-3.8-7.1-8.5-7.1z" />
+    <circle cx="7.6" cy="11.4" r="1.05" fill="currentColor" stroke="none" />
+    <circle cx="10.2" cy="7.6" r="1.05" fill="currentColor" stroke="none" />
+    <circle cx="14.6" cy="7.7" r="1.05" fill="currentColor" stroke="none" />
+  </Svg>
+)
+export const IconWand = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m4 20 11-11" />
+    <path d="m13.5 7.5 3 3" />
+    <path d="M18 3v3M16.5 4.5h3M20 9v2M19 10h2M10 3v2M9 4h2" />
+  </Svg>
+)
+export const IconHardDrive = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="13" width="17" height="6.5" rx="1.6" />
+    <path d="M5.5 13 8 5.5h8l2.5 7.5" />
+    <path d="M16.5 16.25h.01M13.5 16.25h.01" strokeWidth={2.2} />
+  </Svg>
+)
+export const IconSmile = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M8.5 14.2c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8" />
+    <path d="M9.2 9.6h.01M14.8 9.6h.01" strokeWidth={2.4} />
+  </Svg>
+)
+export const IconChart = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 20V4M4 20h16" />
+    <path d="M8 16v-4M12 16V8M16 16v-6" strokeWidth={2.2} />
+  </Svg>
+)
+export const IconSlash = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+    <path d="m14.5 7.5-5 9" />
+  </Svg>
+)
+export const IconLogin = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" />
+    <path d="M3.5 12h11M11 8.5l3.5 3.5-3.5 3.5" />
+  </Svg>
+)

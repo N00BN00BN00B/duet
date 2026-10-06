@@ -89,7 +89,9 @@ class ClaudeSession {
     public permissionMode: string,
     readonly access: AccessMode,
     emit: Emit,
-    saveImage: (data: string, mediaType: string) => string | null
+    saveImage: (data: string, mediaType: string) => string | null,
+    /** Personality text the process was started with (`--append-system-prompt`). */
+    readonly instructions: string | undefined = undefined
   ) {
     this.emit = emit
     this.mapper = new ClaudeMapper({
@@ -334,10 +336,11 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (mode === 'bypassPermissions') args.push('--allow-dangerously-skip-permissions')
     if (req.model && req.model !== 'default') args.push('--model', req.model)
     if (req.effort) args.push('--effort', req.effort)
+    if (req.instructions) args.push('--append-system-prompt', req.instructions)
     if (resume) args.push('--resume', sessionId)
     else args.push('--session-id', sessionId)
-    this.deps.log?.('[claude] spawn', bin, args.join(' '), 'cwd', req.cwd)
-    const session = new ClaudeSession(bin, args, req.cwd, this.deps.env(), sessionId, req.model, req.effort, mode, req.access, emit, this.saveImage)
+    this.deps.log?.('[claude] spawn', bin, args.filter((a) => a !== req.instructions).join(' '), 'cwd', req.cwd)
+    const session = new ClaudeSession(bin, args, req.cwd, this.deps.env(), sessionId, req.model, req.effort, mode, req.access, emit, this.saveImage, req.instructions)
     session.onCommands = (commands) => {
       if (commands.length) this.commandsCache = commands
     }
@@ -367,6 +370,7 @@ export class ClaudeAdapter implements ProviderAdapter {
       !session.exited &&
       session.cwd === req.cwd &&
       session.effort === req.effort &&
+      session.instructions === req.instructions &&
       (req.nativeId === undefined || req.nativeId === session.sessionId) &&
       // Bypass mode needs a launch flag, so switching into/out of it needs a fresh process.
       (session.permissionMode === 'bypassPermissions') === (req.access === 'full')
@@ -621,6 +625,68 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   isActive(threadId: string): boolean {
     return !!this.sessions.get(threadId)?.turnActive
+  }
+
+  /**
+   * One question in a throwaway `claude -p` run: no tools, no MCP servers, no settings or hooks,
+   * nothing saved to the session history. Returns the answer text.
+   */
+  oneShot(prompt: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+    const bin = this.deps.binary()
+    if (!bin) return Promise.reject(new Error('Claude Code is not installed'))
+    const args = ['-p', '--output-format', 'json', '--model', 'haiku', '--tools', '', '--strict-mcp-config', '--setting-sources', '', '--disable-slash-commands', '--no-session-persistence', '--max-turns', '1']
+    return new Promise((resolve, reject) => {
+      // No extended thinking: it multiplies the wait (≈13s → 3s for a theme) without better answers here.
+      const child = spawn(bin, args, { cwd: homedir(), env: { ...this.deps.env(), MAX_THINKING_TOKENS: '0' }, stdio: ['pipe', 'pipe', 'pipe'] })
+      let out = ''
+      const err = new TailBuffer(4000)
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM')
+        reject(new Error('Claude took too long to answer'))
+      }, opts.timeoutMs ?? 120_000)
+      child.stdout?.on('data', (c) => (out += c))
+      child.stderr?.on('data', (c) => err.push(c))
+      child.stdin?.on('error', () => undefined)
+      child.on('error', (e) => {
+        clearTimeout(timer)
+        reject(new Error(friendlyClaudeError(e.message, err.value)))
+      })
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        let result: Json
+        try {
+          result = JSON.parse(out.trim())
+        } catch {
+          return reject(new Error(friendlyClaudeError(`Claude exited (${code})`, err.value)))
+        }
+        if (result?.is_error || typeof result?.result !== 'string') return reject(new Error(String(result?.result || (result?.errors ?? []).join(' ') || 'Claude could not answer')))
+        resolve(result.result)
+      })
+      child.stdin?.end(prompt)
+    })
+  }
+
+  /** Cheap sign-in check (`claude auth status`), for watching a login finish. */
+  async loginStatus(): Promise<boolean> {
+    const bin = this.deps.binary()
+    if (!bin) return false
+    return new Promise((resolve) => {
+      const child = spawn(bin, ['auth', 'status', '--json'], { env: this.deps.env(), stdio: ['ignore', 'pipe', 'ignore'] })
+      let out = ''
+      const timer = setTimeout(() => child.kill('SIGTERM'), 15_000)
+      child.stdout?.on('data', (c) => (out += c))
+      child.on('error', () => resolve(false))
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        try {
+          const parsed = JSON.parse(out)
+          if (parsed?.loggedIn) this.statusCache = null
+          resolve(!!parsed?.loggedIn)
+        } catch {
+          resolve(code === 0)
+        }
+      })
+    })
   }
 
   mcpStatus(): { name: string; status: string }[] {

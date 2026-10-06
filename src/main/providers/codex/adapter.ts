@@ -8,6 +8,7 @@ import type {
   RateWindow,
   SlashCommand
 } from '@shared/types'
+import { CODEX_INIT_PROMPT } from './prompts'
 import { binaryVersion } from '../../env'
 import { NativeSessionLostError, type Emit, type ProviderAdapter, type TurnRequest } from '../types'
 import { CodexRpc, RpcError } from './rpc'
@@ -51,7 +52,13 @@ interface ThreadState {
   cwd: string
   emit: Emit
   mapper: CodexThreadMapper
+  /** The turn Codex is running now — what `turn/interrupt` needs. */
   turnId?: string
+  /**
+   * The turn Duet started (`turn/start` / `review/start` reply). A review reports an inner turn as
+   * started, which `turnId` then holds, but completes under this id.
+   */
+  rootTurnId?: string
   active: boolean
   interrupted: boolean
   interruptTimer?: NodeJS.Timeout
@@ -60,6 +67,9 @@ interface ThreadState {
   /** Incremented for every turn, so timers armed for an old turn can never touch a newer one. */
   turnSeq: number
   startedAt: number
+  /** Thread token totals: latest, and at the start of the current turn (for per-turn usage). */
+  tokens?: { input: number; cached: number; output: number }
+  tokensAtStart?: { input: number; cached: number; output: number }
 }
 
 interface PendingRequest {
@@ -77,6 +87,9 @@ export class CodexAdapter implements ProviderAdapter {
   private byCodex = new Map<string, string>()
   /** Codex thread ids of deleted Duet threads: their late events are dropped, never reassigned. */
   private released = new Set<string>()
+  /** Throwaway threads (theme design…) and who listens to them. Never routed to a chat. */
+  private oneShots = new Map<string, (method: string, params: Json) => void>()
+  private pendingLogin: { id: string | null; onDone: (ok: boolean, message?: string) => void } | null = null
   private approvals = new Map<string, PendingRequest>()
   private statusCache: ProviderStatus | null = null
   private statusPromise: Promise<ProviderStatus> | null = null
@@ -199,7 +212,14 @@ export class CodexAdapter implements ProviderAdapter {
           throw new Error(friendlyCodexError(msg, rpc.stderr.value))
         }
       } else {
-        const params: Json = { cwd: req.cwd, model: req.model ?? null, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, config: { 'tools.update_plan.enabled': true } }
+        const params: Json = {
+          cwd: req.cwd,
+          model: req.model ?? null,
+          approvalPolicy: policy.approvalPolicy,
+          sandbox: policy.sandbox,
+          developerInstructions: req.instructions || null,
+          config: { 'tools.update_plan.enabled': true }
+        }
         let res: Json
         try {
           res = await rpc.request('thread/start', params)
@@ -224,6 +244,7 @@ export class CodexAdapter implements ProviderAdapter {
     if (req.access === 'plan') text = `(Plan mode: investigate and propose a plan. Do not modify files.)\n\n${text}`
     if (pathLines.length) text = `${text}\n\n${pathLines.join('\n')}`
     input.unshift({ type: 'text', text, text_elements: [] })
+    for (const skill of req.skills ?? []) input.push({ type: 'skill', name: skill.name, path: skill.path })
     if (req.model) st.mapper.model = req.model
     if (st.interruptTimer) {
       clearTimeout(st.interruptTimer)
@@ -234,19 +255,29 @@ export class CodexAdapter implements ProviderAdapter {
     st.interrupted = false
     st.interruptSentFor = undefined
     st.turnId = undefined
+    st.rootTurnId = undefined
     st.startedAt = Date.now()
+    st.tokensAtStart = st.tokens ? { ...st.tokens } : undefined
     try {
-      const res = await rpc.request('turn/start', {
-        threadId: st.codexId,
-        input,
-        cwd: req.cwd,
-        model: req.model ?? null,
-        effort: req.effort ?? null,
-        approvalPolicy: policy.approvalPolicy,
-        sandboxPolicy: policy.sandboxPolicy,
-        summary: 'auto'
-      })
-      if (res?.turn?.id) st.turnId = res.turn.id
+      const res = req.review
+        ? // A code review runs as a turn of its own in this thread; its findings arrive as items.
+          await rpc.request('review/start', { threadId: st.codexId, target: req.review, delivery: 'inline' })
+        : await rpc.request('turn/start', {
+            threadId: st.codexId,
+            input,
+            cwd: req.cwd,
+            model: req.model ?? null,
+            effort: req.effort ?? null,
+            approvalPolicy: policy.approvalPolicy,
+            sandboxPolicy: policy.sandboxPolicy,
+            summary: 'auto',
+            ...(req.fast ? { serviceTier: 'priority' } : {})
+          })
+      if (res?.turn?.id) {
+        st.rootTurnId = res.turn.id
+        // `turn/started` may have come first; for a review it names the inner turn, which is the one to interrupt.
+        st.turnId ??= res.turn.id
+      }
       // Stop pressed before Codex told us the turn id.
       if (st.interrupted && st.active) void this.sendInterrupt(st)
     } catch (error) {
@@ -256,7 +287,7 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   private async resumeThread(rpc: CodexRpc, threadId: string, req: TurnRequest, policy: ReturnType<typeof codexPolicy>): Promise<void> {
-    const params = { threadId, cwd: req.cwd, model: req.model ?? null, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, excludeTurns: true }
+    const params = { threadId, cwd: req.cwd, model: req.model ?? null, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, developerInstructions: req.instructions || null, excludeTurns: true }
     try {
       await rpc.request('thread/resume', params)
     } catch (error) {
@@ -299,7 +330,14 @@ export class CodexAdapter implements ProviderAdapter {
       }
       st.codexId = req.nativeId
     } else {
-      const res = await rpc.request('thread/start', { cwd: req.cwd, model: req.model ?? null, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, config: { 'tools.update_plan.enabled': true } })
+      const res = await rpc.request('thread/start', {
+        cwd: req.cwd,
+        model: req.model ?? null,
+        approvalPolicy: policy.approvalPolicy,
+        sandbox: policy.sandbox,
+        developerInstructions: req.instructions || null,
+        config: { 'tools.update_plan.enabled': true }
+      })
       st.codexId = res.thread.id as string
     }
     st.cwd = req.cwd
@@ -447,6 +485,24 @@ export class CodexAdapter implements ProviderAdapter {
       this.adoptSubagent(params?.thread)
       return
     }
+    if (method === 'account/login/completed') {
+      const pending = this.pendingLogin
+      if (pending && (!pending.id || !params?.loginId || params.loginId === pending.id)) {
+        this.pendingLogin = null
+        this.statusCache = null
+        pending.onDone(!!params?.success, params?.error ?? undefined)
+      }
+      return
+    }
+    if (method === 'account/updated') {
+      this.statusCache = null
+      return
+    }
+    const oneShot = typeof params?.threadId === 'string' ? this.oneShots.get(params.threadId) : undefined
+    if (oneShot) {
+      oneShot(method, params)
+      return
+    }
     const st = this.resolveThread(params?.threadId)
     if (!st) return
     const primary = this.isPrimary(st, params.threadId)
@@ -488,6 +544,8 @@ export class CodexAdapter implements ProviderAdapter {
       case 'thread/tokenUsage/updated': {
         if (!primary) break
         const usage = params.tokenUsage
+        const total = usage?.total
+        if (total) st.tokens = { input: Number(total.inputTokens ?? 0), cached: Number(total.cachedInputTokens ?? 0), output: Number(total.outputTokens ?? 0) + Number(total.reasoningOutputTokens ?? 0) }
         const used = usage?.last?.totalTokens ?? 0
         if (used > 0) st.emit({ type: 'context', usage: { usedTokens: used, windowTokens: usage?.modelContextWindow ?? undefined } })
         break
@@ -503,7 +561,9 @@ export class CodexAdapter implements ProviderAdapter {
       case 'turn/completed': {
         if (!primary) break
         const turn = params.turn ?? {}
-        if (turn.id && st.turnId && turn.id !== st.turnId) break
+        const expected = st.rootTurnId ?? st.turnId
+        if (turn.id && expected && turn.id !== expected) break
+        st.rootTurnId = undefined
         if (st.interruptTimer) {
           clearTimeout(st.interruptTimer)
           st.interruptTimer = undefined
@@ -513,11 +573,15 @@ export class CodexAdapter implements ProviderAdapter {
         st.active = false
         const status = turn.status === 'interrupted' || st.interrupted ? 'interrupted' : turn.status === 'failed' ? 'failed' : 'completed'
         const err = turn.error
+        const spent = st.tokens && st.tokensAtStart ? { input: st.tokens.input - st.tokensAtStart.input, cached: st.tokens.cached - st.tokensAtStart.cached, output: st.tokens.output - st.tokensAtStart.output } : st.tokens
         st.emit({
           type: 'turn-end',
           status,
           error: status === 'failed' ? [err?.message, err?.additionalDetails].filter(Boolean).join('\n') || 'Codex turn failed' : undefined,
           durationMs: typeof turn.durationMs === 'number' ? turn.durationMs : Date.now() - st.startedAt,
+          inputTokens: spent && spent.input > 0 ? spent.input : undefined,
+          outputTokens: spent && spent.output > 0 ? spent.output : undefined,
+          cacheReadTokens: spent && spent.cached > 0 ? spent.cached : undefined,
           model: m.model
         })
         this.touch()
@@ -564,9 +628,9 @@ export class CodexAdapter implements ProviderAdapter {
       rpc.respondError(id, -32601, `Duet does not support ${method}`)
       return
     }
-    const st = this.resolveThread(params?.threadId)
+    const st = typeof params?.threadId === 'string' && this.oneShots.has(params.threadId) ? undefined : this.resolveThread(params?.threadId)
     if (!st) {
-      // Nobody to ask: decline safely.
+      // Nobody to ask (or a throwaway thread): decline safely.
       this.answer({ duetId: '', rpcId: id, method, params }, { kind: 'deny' })
       return
     }
@@ -658,14 +722,18 @@ export class CodexAdapter implements ProviderAdapter {
           const res: Json = await rpc.request('model/list', cursor ? { cursor, limit: 100 } : { limit: 100 }, 20_000)
           for (const m of res?.data ?? []) {
             if (m.hidden) continue
+            const efforts: Json[] = Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts : []
+            const fast = (Array.isArray(m.serviceTiers) ? m.serviceTiers : []).find((t: Json) => t?.id && t.id !== 'default')
             models.push({
               id: m.id ?? m.model,
               label: m.displayName || m.id,
               description: m.description || undefined,
-              efforts: Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts.map((e: Json) => e.reasoningEffort).filter(Boolean) : undefined,
+              efforts: efforts.length ? efforts.map((e: Json) => e.reasoningEffort).filter(Boolean) : undefined,
+              effortHints: Object.fromEntries(efforts.filter((e: Json) => e?.reasoningEffort && e.description).map((e: Json) => [e.reasoningEffort, String(e.description)])),
               defaultEffort: m.defaultReasoningEffort || undefined,
               isDefault: !!m.isDefault,
-              supportsImages: Array.isArray(m.inputModalities) ? m.inputModalities.includes('image') : true
+              supportsImages: Array.isArray(m.inputModalities) ? m.inputModalities.includes('image') : true,
+              fastTier: fast ? { id: String(fast.id), name: String(fast.name ?? 'Fast'), description: String(fast.description ?? '') } : undefined
             })
           }
           cursor = res?.nextCursor ?? null
@@ -694,22 +762,120 @@ export class CodexAdapter implements ProviderAdapter {
     return this.statusPromise
   }
 
-  async commands(): Promise<SlashCommand[]> {
-    return [
+  /** Codex's own commands (Duet runs them through the app-server) plus your Codex skills. */
+  async commands(cwd: string): Promise<SlashCommand[]> {
+    const builtIn: SlashCommand[] = [
+      { name: 'review', description: 'Review your uncommitted changes (or a branch / commit)', argumentHint: '[branch | commit | what to focus on]' },
       { name: 'compact', description: 'Summarize the conversation to free up context' },
-      { name: 'review', description: 'Ask Codex to review the current changes' }
+      { name: 'init', description: 'Write an AGENTS.md with instructions for this project', prompt: CODEX_INIT_PROMPT }
     ]
+    try {
+      const res: Json = await this.rpcRequest('skills/list', { cwds: cwd ? [cwd] : [] }, 15_000)
+      const skills: SlashCommand[] = []
+      for (const entry of res?.data ?? []) {
+        for (const s of entry?.skills ?? []) {
+          if (!s?.name || s.enabled === false || typeof s.path !== 'string') continue
+          if (skills.some((x) => x.name === s.name)) continue
+          skills.push({ name: String(s.name), description: String(s.interface?.shortDescription ?? s.shortDescription ?? s.description ?? ''), kind: 'skill', path: s.path, scope: s.scope })
+        }
+      }
+      return [...builtIn, ...skills]
+    } catch {
+      return builtIn
+    }
   }
 
-  /** Runs `thread/compact/start` for a thread. */
-  async compact(threadId: string): Promise<boolean> {
+  /** The prompt Duet sends for /init. */
+  initPrompt(): string {
+    return CODEX_INIT_PROMPT
+  }
+
+  /** Summarizes a thread's history (`thread/compact/start`), as a turn of its own. */
+  async compact(threadId: string, emit: Emit): Promise<void> {
     const st = this.threads.get(threadId)
-    if (!st?.codexId || !this.rpc) return false
+    if (!st?.codexId || !st.loaded || !this.rpc) throw new Error('Nothing to compact yet — send Codex a message first.')
+    if (st.active) throw new Error('Codex is still working on the previous message.')
+    st.emit = emit
+    st.mapper.emit = emit
+    st.turnSeq++
+    st.active = true
+    st.interrupted = false
+    st.interruptSentFor = undefined
+    st.turnId = undefined
+    st.rootTurnId = undefined
+    st.startedAt = Date.now()
     try {
       await this.rpc.request('thread/compact/start', { threadId: st.codexId })
-      return true
+    } catch (error) {
+      st.active = false
+      throw new Error(friendlyCodexError((error as Error).message, this.rpc?.stderr.value ?? ''))
+    }
+  }
+
+  /**
+   * Runs one question in a throwaway thread that Codex never saves (theme design and the like)
+   * and returns the final answer. `outputSchema` makes Codex answer with matching JSON.
+   */
+  async oneShot(prompt: string, opts: { outputSchema?: unknown; timeoutMs?: number } = {}): Promise<string> {
+    const rpc = await this.ensureServer()
+    const started: Json = await rpc.request('thread/start', { cwd: homedir(), ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only', model: null }, 30_000)
+    const codexId: string | undefined = started?.thread?.id
+    if (!codexId) throw new Error('Codex did not start a thread')
+    return new Promise<string>((resolve, reject) => {
+      let answer = ''
+      const finish = (error?: Error) => {
+        clearTimeout(timer)
+        this.oneShots.delete(codexId)
+        this.rpc?.request('thread/unsubscribe', { threadId: codexId }, 5000).catch(() => undefined)
+        if (error) reject(error)
+        else resolve(answer)
+      }
+      const timer = setTimeout(() => finish(new Error('Codex took too long to answer')), opts.timeoutMs ?? 120_000)
+      this.oneShots.set(codexId, (method, params) => {
+        if (method === 'item/completed' && params?.item?.type === 'agentMessage') answer = String(params.item.text ?? answer)
+        else if (method === 'turn/completed') {
+          const turn = params?.turn ?? {}
+          if (turn.status === 'failed') finish(new Error(turn.error?.message || 'Codex could not answer'))
+          else finish()
+        }
+      })
+      rpc
+        .request('turn/start', {
+          threadId: codexId,
+          input: [{ type: 'text', text: prompt, text_elements: [] }],
+          approvalPolicy: 'never',
+          sandboxPolicy: { type: 'readOnly', networkAccess: false },
+          effort: 'low',
+          summary: 'none',
+          outputSchema: opts.outputSchema ?? null
+        })
+        .catch((error: Error) => finish(new Error(friendlyCodexError(error.message, rpc.stderr.value))))
+    })
+  }
+
+  /** Starts ChatGPT sign-in in the browser; `onDone` hears how it ended. */
+  async login(onDone: (ok: boolean, message?: string) => void): Promise<string> {
+    const rpc = await this.ensureServer()
+    const res: Json = await rpc.request('account/login/start', { type: 'chatgpt' }, 30_000)
+    if (res?.type !== 'chatgpt' || typeof res.authUrl !== 'string') throw new Error('Codex did not return a sign-in link')
+    this.pendingLogin = { id: typeof res.loginId === 'string' ? res.loginId : null, onDone }
+    return res.authUrl
+  }
+
+  /** Account-wide Codex usage: daily tokens and streaks, straight from OpenAI. */
+  async accountUsage(): Promise<{ daily: { day: string; tokens: number }[]; lifetimeTokens?: number; peakDailyTokens?: number; currentStreakDays?: number; longestStreakDays?: number } | null> {
+    try {
+      const res: Json = await this.rpcRequest('account/usage/read', {}, 20_000)
+      const n = (v: unknown) => (v === null || v === undefined ? undefined : Number(v))
+      return {
+        daily: (Array.isArray(res?.dailyUsageBuckets) ? res.dailyUsageBuckets : []).map((b: Json) => ({ day: String(b.startDate).slice(0, 10), tokens: Number(b.tokens ?? 0) })),
+        lifetimeTokens: n(res?.summary?.lifetimeTokens),
+        peakDailyTokens: n(res?.summary?.peakDailyTokens),
+        currentStreakDays: n(res?.summary?.currentStreakDays),
+        longestStreakDays: n(res?.summary?.longestStreakDays)
+      }
     } catch {
-      return false
+      return null
     }
   }
 

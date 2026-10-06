@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { duet } from '@/lib/api'
-import { goHome, onCommand, openBrowser, saveSettings, setView, switchProvider, togglePanel, useApp } from '@/state/store'
+import { addProject, goHome, onCommand, openBrowser, setView, switchProvider, togglePanel, useApp } from '@/state/store'
+import { BackgroundEffect } from './components/BackgroundEffect'
+import { UsageView } from './components/views/UsageView'
+import { CustomizeView } from './components/views/CustomizeView'
 import { Sidebar } from './components/Sidebar'
 import { ThreadView } from './components/ThreadView'
 import { HomeView } from './components/views/HomeView'
@@ -12,7 +15,8 @@ import { SettingsView } from './components/views/SettingsView'
 import { BrowserPanel } from './components/panels/BrowserPanel'
 import { ChangesPanel } from './components/panels/ChangesPanel'
 import { TerminalDrawer } from './components/panels/TerminalDrawer'
-import { CommandPalette, Lightbox, Onboarding, Toasts } from './components/overlays'
+import { CommandPalette, Lightbox, Toasts } from './components/overlays'
+import { Onboarding } from './components/Onboarding'
 import { IconDiff, IconGlobe, IconX } from './components/icons'
 import { EmptyState, IconButton } from './components/ui/primitives'
 
@@ -33,6 +37,10 @@ function MainView() {
       return <BackupsView />
     case 'settings':
       return <SettingsView />
+    case 'usage':
+      return <UsageView />
+    case 'customize':
+      return <CustomizeView />
     default:
       return <HomeView />
   }
@@ -44,7 +52,7 @@ function RightPanel() {
   const cwd = useApp((s) => (s.view === 'thread' && s.currentId ? s.threads[s.currentId]?.cwd : s.homeProject) ?? null)
   if (!panel) return null
   return (
-    <div className="relative flex h-full shrink-0 flex-col border-l border-line" style={{ width }} data-testid="right-panel">
+    <div className="relative z-[1] flex h-full shrink-0 flex-col border-l border-line bg-panel" style={{ width }} data-testid="right-panel">
       <div
         role="separator"
         aria-orientation="vertical"
@@ -112,12 +120,7 @@ export function App() {
           goHome()
           break
         case 'open-project':
-          void duet.app.pickFolder().then(async (dir) => {
-            if (!dir) return
-            const s = useApp.getState().settings
-            if (s && !s.projects.includes(dir)) await saveSettings({ projects: [dir, ...s.projects] })
-            goHome(dir)
-          })
+          void addProject()
           break
         case 'palette':
           useApp.setState((s) => ({ paletteOpen: !s.paletteOpen }))
@@ -174,9 +177,24 @@ export function App() {
     return <div className="h-full w-full bg-bg" />
   }
   return (
-    <div className="flex h-full w-full overflow-hidden bg-bg text-fg">
+    <div
+      className="relative flex h-full w-full overflow-hidden text-fg"
+      onDragOver={(e) => {
+        if (Array.from(e.dataTransfer.types).includes('Files')) e.preventDefault()
+      }}
+      onDrop={(e) => {
+        // A folder dropped anywhere outside the message box becomes a project with a new chat.
+        if (e.defaultPrevented) return
+        const file = e.dataTransfer.files[0]
+        if (!file) return
+        e.preventDefault()
+        const path = duet.util.pathForFile(file)
+        if (path) void duet.app.isFolder(path).then((folder) => (folder ? addProject(path) : undefined))
+      }}
+    >
+      <BackgroundEffect />
       {sidebarOpen && <Sidebar />}
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="relative z-[1] flex min-w-0 flex-1 flex-col bg-panel">
         <div className="flex min-h-0 flex-1">
           <MainView />
         </div>

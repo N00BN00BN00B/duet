@@ -30,18 +30,20 @@
 :root,
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #0d0d10;
-  --bg-sidebar: #09090b;
-  --surface: #141418;
-  --surface-2: #1a1a1f;
-  --surface-3: #222228;
-  --hover: rgb(255 255 255 / 0.045);
-  --active: rgb(255 255 255 / 0.075);
-  --border: rgb(255 255 255 / 0.07);
-  --border-strong: rgb(255 255 255 / 0.12);
-  --text: #ececee;
-  --text-2: #a3a3ad;
-  --text-3: #6f6f7a;
+  /* Graphite — the JS theme engine overrides all of these; they cover the first paint. */
+  --bg: #18181a;
+  --bg-panel: #18181a;
+  --bg-sidebar: #131315;
+  --surface: #202022;
+  --surface-2: #252527;
+  --surface-3: #2c2c2e;
+  --hover: rgb(236 236 236 / 0.05);
+  --active: rgb(236 236 236 / 0.085);
+  --border: rgb(236 236 236 / 0.08);
+  --border-strong: rgb(236 236 236 / 0.14);
+  --text: #ececec;
+  --text-2: #a5a5a7;
+  --text-3: #79797b;
   --ok: #4ade80;
   --warn: #fbbf24;
   --bad: #f87171;
@@ -50,24 +52,25 @@
   --diff-add-fg: #86efac;
   --diff-del-bg: rgb(248 113 113 / 0.1);
   --diff-del-fg: #fca5a5;
-  --code-bg: #101014;
+  --code-bg: #121214;
   --selection: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg: #fafafa;
-  --bg-sidebar: #f2f2f4;
+  --bg: #fafaf9;
+  --bg-panel: #fafaf9;
+  --bg-sidebar: #f2f2f0;
   --surface: #ffffff;
-  --surface-2: #f4f4f6;
-  --surface-3: #ebebee;
-  --hover: rgb(0 0 0 / 0.04);
-  --active: rgb(0 0 0 / 0.07);
-  --border: rgb(0 0 0 / 0.08);
-  --border-strong: rgb(0 0 0 / 0.14);
-  --text: #18181b;
-  --text-2: #52525b;
-  --text-3: #9b9ba5;
+  --surface-2: #f2f2f1;
+  --surface-3: #ebebea;
+  --hover: rgb(29 29 31 / 0.045);
+  --active: rgb(29 29 31 / 0.075);
+  --border: rgb(29 29 31 / 0.09);
+  --border-strong: rgb(29 29 31 / 0.15);
+  --text: #1d1d1f;
+  --text-2: #55555a;
+  --text-3: #8b8b90;
   --ok: #16a34a;
   --warn: #d97706;
   --bad: #dc2626;
@@ -76,13 +79,14 @@
   --diff-add-fg: #15803d;
   --diff-del-bg: rgb(220 38 38 / 0.08);
   --diff-del-fg: #b91c1c;
-  --code-bg: #f6f6f8;
+  --code-bg: #f4f4f3;
   --composer-shadow: 0 1px 0 rgb(255 255 255 / 0.9) inset, 0 16px 36px -22px rgb(0 0 0 / 0.28);
   --pop-shadow: 0 0 0 1px var(--border-strong), 0 14px 36px -14px rgb(0 0 0 / 0.22);
 }
 
 @theme inline {
   --color-bg: var(--bg);
+  --color-panel: var(--bg-panel);
   --color-sidebar: var(--bg-sidebar);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
@@ -106,6 +110,13 @@
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
   --ease-out-soft: var(--ease-out);
+  /* Corner roundness follows the theme. */
+  --radius-sm: calc(0.25rem * var(--radius-scale, 1));
+  --radius-md: calc(0.375rem * var(--radius-scale, 1));
+  --radius-lg: calc(0.5rem * var(--radius-scale, 1));
+  --radius-xl: calc(0.75rem * var(--radius-scale, 1));
+  --radius-2xl: calc(1rem * var(--radius-scale, 1));
+  --radius-3xl: calc(1.5rem * var(--radius-scale, 1));
 }
 
 @layer base {
@@ -331,6 +342,102 @@ textarea:focus-visible {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
+  }
+}
+:root[data-motion='reduced'] *,
+:root[data-motion='reduced'] *::before,
+:root[data-motion='reduced'] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+}
+
+/* ---------- background effects ---------- */
+/* Only transform and opacity animate, so the GPU composites them and nothing repaints. */
+
+.fx-root {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  contain: strict;
+}
+.fx-layer {
+  position: absolute;
+  will-change: transform;
+}
+:root[data-idle='true'] .fx-root *,
+:root[data-motion='reduced'] .fx-root * {
+  animation-play-state: paused !important;
+}
+@keyframes fx-drift {
+  0%,
+  100% {
+    transform: translate3d(-4%, -3%, 0) scale(1.04);
+  }
+  50% {
+    transform: translate3d(4%, 3%, 0) scale(1.1);
+  }
+}
+@keyframes fx-blob-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  33% {
+    transform: translate3d(12%, 8%, 0) scale(1.15);
+  }
+  66% {
+    transform: translate3d(-8%, 14%, 0) scale(0.92);
+  }
+}
+@keyframes fx-blob-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  50% {
+    transform: translate3d(-14%, -10%, 0) scale(0.9);
+  }
+}
+@keyframes fx-wave {
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+@keyframes fx-aurora {
+  0%,
+  100% {
+    transform: translate3d(-6%, 0, 0) skewX(-12deg) scaleY(1);
+  }
+  50% {
+    transform: translate3d(6%, -4%, 0) skewX(10deg) scaleY(1.18);
+  }
+}
+@keyframes fx-grid {
+  to {
+    transform: translate3d(0, 48px, 0);
+  }
+}
+@keyframes fx-twinkle {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes fx-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
   }
 }
 
@@ -560,6 +667,52 @@ textarea:focus-visible {
   border: 1px solid var(--border-strong);
   color: var(--text-3);
   background: var(--surface-2);
+}
+/* The message box glows softly while the agent works. */
+@keyframes composer-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+      0 0 22px -10px color-mix(in srgb, var(--accent) 45%, transparent),
+      var(--composer-shadow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+      0 0 30px -8px color-mix(in srgb, var(--accent) 60%, transparent),
+      var(--composer-shadow);
+  }
+}
+.composer-live {
+  animation: composer-breathe 2.6s ease-in-out infinite;
+}
+:root[data-idle='true'] .composer-live {
+  animation-play-state: paused;
+}
+
+/* Range sliders: accent fill up to the thumb. */
+.duet-range {
+  appearance: none;
+  background: transparent;
+}
+.duet-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--fill, 50%), var(--surface-3) var(--fill, 50%));
+}
+.duet-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 1px var(--border-strong), 0 1px 3px rgb(0 0 0 / 0.35);
+  transition: transform 150ms var(--ease-out);
+}
+.duet-range:active::-webkit-slider-thumb {
+  transform: scale(1.15);
 }
 webview {
   display: flex;

@@ -40,6 +40,8 @@ export async function launchDuet(opts: { onboarded?: boolean; theme?: 'dark' | '
       DUET_E2E: '1',
       DUET_FAKE_SPEED: '3',
       DUET_USER_DATA: userData,
+      // The `duet` command installs into the test's home, never into a real bin folder.
+      DUET_CLI_DIR: join(home, 'bin-test'),
       ELECTRON_ENABLE_LOGGING: '0'
     } as Record<string, string>
   })

@@ -1,3 +1,5 @@
+import type { ThemeSpec } from './theme'
+
 // Shared contract between the Electron main process and the renderer.
 
 export type ProviderId = 'claude' | 'codex'
@@ -28,9 +30,13 @@ export interface ModelOption {
   label: string
   description?: string
   efforts?: string[]
+  /** What each effort level means for this model (from the agent, when it says). */
+  effortHints?: Record<string, string>
   defaultEffort?: string
   isDefault?: boolean
   supportsImages?: boolean
+  /** A faster paid tier the model offers (Codex "Fast"). */
+  fastTier?: { id: string; name: string; description: string }
 }
 
 export interface Attachment {
@@ -70,6 +76,8 @@ interface ItemBase {
 
 export interface UserItem extends ItemBase {
   kind: 'user'
+  /** Codex skills sent with the message. */
+  skills?: string[]
   provider: ProviderId
   text: string
   attachments: Attachment[]
@@ -210,10 +218,18 @@ export interface ThreadMeta {
   native: Partial<Record<ProviderId, NativeSession>>
   /** Set when the thread was imported from an existing Claude/Codex session. */
   origin?: { provider: ProviderId; nativeId: string }
+  /** Listed by chat sync but not loaded yet: the messages are read from Claude/Codex when opened. */
+  lazy?: boolean
+  /** Imported and not continued in Duet, so a newer copy at the source may replace it. */
+  pristine?: boolean
+  /** Last change at the source (Claude Code / Codex), for keeping synced chats current. */
+  sourceUpdatedAt?: number
   preview?: string
   itemCount: number
   context?: ContextUsage
   costUsd?: number
+  /** Codex Fast mode (priority tier) for this chat. */
+  fast?: boolean
 }
 
 export interface Thread extends ThreadMeta {
@@ -227,9 +243,20 @@ export interface NewThreadInput {
   title?: string
 }
 
+/** A Codex skill picked from the commands menu, sent along with the message. */
+export interface SkillRef {
+  name: string
+  path: string
+}
+
+export type ReviewTarget = { type: 'uncommittedChanges' } | { type: 'baseBranch'; branch: string } | { type: 'commit'; sha: string } | { type: 'custom'; instructions: string }
+
 export interface SendInput {
   text: string
   attachments: Attachment[]
+  skills?: SkillRef[]
+  /** Run an agent command instead of a normal message (Codex /review). */
+  review?: ReviewTarget
 }
 
 export type ApprovalDecision =
@@ -239,7 +266,7 @@ export type ApprovalDecision =
   | { kind: 'answer'; answers: Record<string, string> }
 
 export type ThreadPatch = Partial<
-  Pick<ThreadMeta, 'title' | 'provider' | 'models' | 'efforts' | 'access' | 'pinned' | 'archived' | 'unread' | 'cwd'>
+  Pick<ThreadMeta, 'title' | 'provider' | 'models' | 'efforts' | 'access' | 'pinned' | 'archived' | 'unread' | 'cwd' | 'fast'>
 >
 
 // ---------- provider status ----------
@@ -281,10 +308,91 @@ export type DuetEvent =
   | { type: 'navigate'; view: string }
   | { type: 'command'; name: string }
   | { type: 'browser-open'; url: string }
+  /** Usage numbers changed (a turn ended or a history scan finished). */
+  | { type: 'usage-updated' }
+  /** Progress of syncing Claude Code and Codex chats into the sidebar. */
+  | { type: 'chat-sync'; phase: 'running' | 'done'; added: number; updated: number; total: number }
+  | { type: 'login-finished'; provider: ProviderId; ok: boolean; message?: string }
+  /** Open the composer with a draft (from the `duet` command or a duet:// link). */
+  | { type: 'compose'; cwd?: string; text?: string; provider?: ProviderId; threadId?: string }
+  /** Many threads added or changed at once (chat sync); merged instead of one event each. */
+  | { type: 'threads-bulk'; metas: ThreadMeta[] }
+
+// ---------- usage, storage, CLI ----------
+
+export interface UsageBucket {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+  turns: number
+}
+
+export interface UsageDay extends UsageBucket {
+  /** Local date, YYYY-MM-DD. */
+  day: string
+  provider: ProviderId
+  model: string
+  /** 'duet' for turns run in Duet, 'outside' for Claude Code / Codex used directly. */
+  source: 'duet' | 'outside'
+}
+
+export interface UsageSummary {
+  days: UsageDay[]
+  from: string
+  to: string
+  /** Codex's own account-wide numbers (from OpenAI), when available. */
+  codexAccount?: { lifetimeTokens?: number; peakDailyTokens?: number; currentStreakDays?: number; longestStreakDays?: number }
+  /** When the Claude Code and Codex histories were last read (ms). */
+  scannedAt?: number
+  scanning: boolean
+}
+
+export interface StorageStats {
+  threads: { count: number; bytes: number }
+  attachments: { count: number; bytes: number }
+  /** Attachments and tool pictures no chat refers to any more. */
+  unused: { count: number; bytes: number }
+  safetyCopies: { count: number; bytes: number }
+  caches: { bytes: number }
+  logs: { bytes: number }
+  total: number
+}
+
+export interface CliStatus {
+  installed: boolean
+  /** Where the `duet` command lives (or would be installed). */
+  path: string
+  /** Whether that folder is on the shell's PATH. */
+  onPath: boolean
+}
+
+export interface LoginStart {
+  /** 'browser': a sign-in page opened; 'terminal': run `command` in the terminal. */
+  kind: 'browser' | 'terminal'
+  url?: string
+  command?: string
+  message: string
+}
 
 // ---------- settings ----------
 
 export type ThemePref = 'system' | 'dark' | 'light'
+export type AccentMode = 'agent' | 'theme' | 'custom'
+export type Density = 'compact' | 'comfortable' | 'spacious'
+export type ChatWidth = 'narrow' | 'normal' | 'wide'
+export type PersonalityPreset = 'default' | 'concise' | 'friendly' | 'pragmatic' | 'teacher' | 'custom'
+
+export interface PersonalitySettings {
+  preset: PersonalityPreset
+  /** Your own words, used when preset is 'custom'. */
+  custom: string
+  /** Which agents get it. */
+  providers: ProviderId[]
+  /** Where an imported personality came from, e.g. "Claude Code · Explanatory". */
+  importedFrom?: string
+}
 
 export interface Settings {
   theme: ThemePref
@@ -305,6 +413,28 @@ export interface Settings {
   fontSize: number
   browserHome: string
   onboarded: boolean
+  // appearance
+  /** Theme used in dark mode and in light mode (preset or custom theme id). */
+  darkTheme: string
+  lightTheme: string
+  customThemes: ThemeSpec[]
+  accentMode: AccentMode
+  accentColor: string
+  density: Density
+  chatWidth: ChatWidth
+  reduceMotion: boolean
+  backgroundEffects: boolean
+  // sidebar & chat
+  /** Show "Claude ·" / "Codex ·" in front of chat titles. */
+  sidebarAgentNames: boolean
+  /** Time, cost and tokens under each reply. */
+  showTurnDetails: boolean
+  personality: PersonalitySettings
+  /** Keep every Claude Code and Codex chat listed in the sidebar. */
+  chatSync: 'off' | 'auto'
+  lastChatSync?: number
+  /** Count usage from Claude Code and Codex outside Duet too. */
+  usageIncludeOutside: boolean
 }
 
 // ---------- MCP ----------
@@ -430,4 +560,12 @@ export interface SlashCommand {
   name: string
   description: string
   argumentHint?: string
+  /** 'skill' entries are attached to the message (Codex) instead of typed. */
+  kind?: 'command' | 'skill'
+  /** Skill file, for Codex skills. */
+  path?: string
+  /** user / repo / system / plugin… */
+  scope?: string
+  /** For commands Duet expands into a prompt (Codex /init). */
+  prompt?: string
 }

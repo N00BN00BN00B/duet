@@ -132,10 +132,10 @@ export function ThreadView({ meta }: { meta: ThreadMeta }) {
         </div>
       )}
       <div className="shrink-0 px-6 pb-4 pt-1">
-        <div className="mx-auto w-full max-w-[760px]">
+        <div className="mx-auto w-full max-w-[var(--chat-width,760px)]">
           {items && items.length === 0 && meta.status === 'idle' && (
             <div className="mb-3 flex items-center justify-center gap-2 text-[12px] text-fg-3">
-              <ProviderLogo provider={meta.provider} size={12} /> New thread with {PROVIDER_LABEL[meta.provider]} in {projectName(meta.cwd)}
+              <ProviderLogo provider={meta.provider} size={12} /> New chat with {PROVIDER_LABEL[meta.provider]} in {projectName(meta.cwd)}
             </div>
           )}
           <Composer mode="thread" meta={meta} autoFocusKey={focusNonce} />

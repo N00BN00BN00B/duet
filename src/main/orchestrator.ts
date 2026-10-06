@@ -19,6 +19,7 @@ import { PROVIDER_LABEL } from '@shared/types'
 import { firstLine, truncate } from '@shared/paths'
 import type { Store } from './store'
 import { buildHandoff, withHandoff } from './handoff'
+import { personalityInstructions } from '@shared/personality'
 import { NativeSessionLostError, type ProviderAdapter, type RuntimeEvent, type TurnRequest } from './providers/types'
 
 const MAX_TOOL_OUTPUT = 256 * 1024
@@ -69,10 +70,52 @@ export class Orchestrator {
   private running = new Map<string, Run>()
   private pendingDeltas = new Map<string, { threadId: string; itemId: string; field: 'text' | 'output'; delta: string; offset: number }>()
   private deltaTimer: NodeJS.Timeout | null = null
+  private hydrating = new Map<string, Promise<void>>()
 
   constructor(private readonly deps: OrchestratorDeps) {
     this.store = deps.store
     this.adapters = deps.adapters
+    // A thread an agent is working in always stays in memory.
+    this.store.isBusy = (id) => this.running.has(id)
+  }
+
+  /** Adds or refreshes many synced chats at once, with one event for the UI. */
+  upsertSynced(metas: ThreadMeta[]): void {
+    if (!metas.length) return
+    this.store.putMetas(metas)
+    this.deps.broadcast({ type: 'threads-bulk', metas: metas.map((m) => ({ ...m })) })
+    this.updateBadge()
+  }
+
+  /** Reads a synced chat's messages from Claude Code / Codex the first time it is opened. */
+  hydrate(id: string, load: (meta: ThreadMeta) => Promise<TimelineItem[]>): Promise<void> {
+    const meta = this.store.getMeta(id)
+    if (!meta?.lazy) return Promise.resolve()
+    const pending = this.hydrating.get(id)
+    if (pending) return pending
+    const job = (async () => {
+      let items: TimelineItem[]
+      try {
+        items = await load(meta)
+      } catch (error) {
+        items = [{ kind: 'notice', id: `n-${randomUUID()}`, ts: Date.now(), level: 'warn', provider: meta.provider, text: `Couldn’t read this chat from ${PROVIDER_LABEL[meta.provider]}: ${(error as Error).message}` }]
+      }
+      const current = this.store.getMeta(id)
+      if (!current?.lazy) return
+      const origin = current.origin?.provider
+      const native = origin && current.native[origin] ? { ...current.native, [origin]: { ...current.native[origin]!, syncedTo: items.length } } : current.native
+      const lastAssistant = [...items].reverse().find((i) => i.kind === 'assistant')
+      this.store.setItems(id, items)
+      this.touch({
+        ...current,
+        lazy: false,
+        pristine: true,
+        native,
+        preview: lastAssistant && lastAssistant.kind === 'assistant' ? truncate(firstLine(lastAssistant.text), 140) : current.preview
+      })
+    })().finally(() => this.hydrating.delete(id))
+    this.hydrating.set(id, job)
+    return job
   }
 
   // ---------- queries ----------
@@ -151,6 +194,7 @@ export class Orchestrator {
     if (patch.pinned !== undefined) next.pinned = patch.pinned
     if (patch.archived !== undefined) next.archived = patch.archived
     if (patch.unread !== undefined) next.unread = patch.unread
+    if (patch.fast !== undefined) next.fast = !!patch.fast
     if (patch.access !== undefined && patch.access !== meta.access) {
       next.access = patch.access
       for (const provider of Object.keys(meta.native) as ProviderId[]) {
@@ -220,6 +264,7 @@ export class Orchestrator {
     const meta = this.store.getMeta(id)
     if (!meta) throw new Error('Thread not found')
     if (this.store.isFrozen) throw new Error('Duet is restoring a backup and will restart in a moment.')
+    if (meta.lazy) throw new Error('This chat is still loading. Try again in a moment.')
     if (this.running.has(id)) throw new Error('The agent is still working. Wait for it to finish or press Stop.')
     const text = input.text.trim()
     if (!text && input.attachments.length === 0) return
@@ -238,8 +283,9 @@ export class Orchestrator {
     const native = meta.native[provider]
     const handoff = native ? buildHandoff(before, native.syncedTo, provider) : buildHandoff(before, 0, provider, { force: true })
 
-    const userText = text || '(see attached files)'
-    this.push(id, { kind: 'user', id: `u-${randomUUID()}`, ts: Date.now(), provider, text: userText, attachments: input.attachments })
+    const userText = text || (input.review ? '/review' : '(see attached files)')
+    const skills = provider === 'codex' ? (input.skills ?? []).filter((s) => s && typeof s.name === 'string' && typeof s.path === 'string').slice(0, 8) : []
+    this.push(id, { kind: 'user', id: `u-${randomUUID()}`, ts: Date.now(), provider, text: userText, attachments: input.attachments, ...(skills.length ? { skills: skills.map((s) => s.name) } : {}) })
 
     const now = Date.now()
     const next: ThreadMeta = {
@@ -248,7 +294,9 @@ export class Orchestrator {
       status: 'running',
       updatedAt: now,
       preview: truncate(firstLine(userText), 140),
-      unread: false
+      unread: false,
+      // Continued in Duet: chat sync must never replace it with the source's copy again.
+      pristine: false
     }
     this.touch(next)
     const run: Run = { provider, startedAt: now, started: false, cancelled: false }
@@ -263,7 +311,11 @@ export class Orchestrator {
       effort: meta.efforts[provider],
       access: meta.access,
       text: withHandoff(handoff, userText),
-      attachments: input.attachments
+      attachments: input.attachments,
+      instructions: personalityInstructions(this.store.settings.personality, provider),
+      skills: skills.length ? skills : undefined,
+      review: provider === 'codex' ? input.review : undefined,
+      fast: provider === 'codex' && !!meta.fast
     }
 
     try {
@@ -351,6 +403,25 @@ export class Orchestrator {
     }
     await this.adapters[run.provider].interrupt(id)
     this.armStopSafetyNet(id, run)
+  }
+
+  /** Summarizes the chat's history to free up context (Codex natively; Claude via /compact). */
+  async compact(id: string): Promise<void> {
+    const meta = this.store.getMeta(id)
+    if (!meta) throw new Error('Thread not found')
+    const adapter = this.adapters[meta.provider]
+    if (!adapter.compact) return this.send(id, { text: '/compact', attachments: [] })
+    if (this.running.has(id)) throw new Error('The agent is still working. Wait for it to finish or press Stop.')
+    const provider = meta.provider
+    const run: Run = { provider, startedAt: Date.now(), started: false, cancelled: false }
+    this.running.set(id, run)
+    this.touch({ ...meta, status: 'running', updatedAt: Date.now() })
+    try {
+      await adapter.compact(id, (event) => this.onRuntime(id, provider, event))
+      await this.afterStart(id, run)
+    } catch (error) {
+      this.failTurn(id, provider, (error as Error).message, run)
+    }
   }
 
   async stopAll(): Promise<void> {

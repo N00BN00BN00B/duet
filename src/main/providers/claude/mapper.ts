@@ -91,6 +91,8 @@ export class ClaudeMapper {
   private subagentCounts = new Map<string, number>()
   private contextWindow?: number
   private interrupted = false
+  /** A local command already showed its output this turn. */
+  private localOutput = false
   model?: string
   sessionId?: string
   mcpServers: { name: string; status: string }[] = []
@@ -107,6 +109,7 @@ export class ClaudeMapper {
     this.blockCounts.clear()
     this.currentMessageId = ''
     this.interrupted = false
+    this.localOutput = false
   }
 
   markInterrupted(): void {
@@ -169,6 +172,10 @@ export class ClaudeMapper {
         type: 'item',
         item: { kind: 'notice', id: `c-compact-${msg.uuid ?? this.now()}`, ts: this.now(), level: 'info', provider: 'claude', text: pre ? `Context compacted (${Math.round(pre / 1000)}k tokens summarized)` : 'Context compacted' }
       })
+    } else if (msg.subtype === 'local_command_output' && typeof msg.content === 'string' && msg.content.trim()) {
+      // Output of a command Claude runs itself (/context, /usage, /output-style…).
+      this.localOutput = true
+      this.emit({ type: 'item', item: { kind: 'assistant', id: `c-local-${msg.uuid ?? this.now()}`, ts: this.now(), provider: 'claude', text: msg.content.trim() } })
     } else if (msg.subtype === 'api_retry' && typeof msg.attempt === 'number' && msg.attempt >= 2) {
       this.emit({
         type: 'item',
@@ -392,6 +399,10 @@ export class ClaudeMapper {
       const errors = Array.isArray(msg.errors) ? msg.errors.filter((e: unknown) => typeof e === 'string') : []
       error = (typeof msg.result === 'string' && msg.result) || errors.join('\n') || `Claude stopped (${msg.subtype ?? 'error'})`
       if (msg.subtype === 'error_max_turns') error = 'Claude hit the maximum number of turns.'
+    }
+    // A local slash command answers without a model call: its output is the result text.
+    if (msg.local_command && !this.localOutput && status === 'completed' && typeof msg.result === 'string' && msg.result.trim()) {
+      this.emit({ type: 'item', item: { kind: 'assistant', id: `c-local-${msg.uuid ?? this.now()}`, ts: this.now(), provider: 'claude', text: msg.result.trim() } })
     }
     const usage = msg.usage ?? {}
     this.emit({

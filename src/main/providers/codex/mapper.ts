@@ -299,10 +299,17 @@ export function codexItemToTimeline(item: Json, ctx: CodexItemContext, ts?: numb
     }
     case 'contextCompaction':
       return { kind: 'notice', id, ts: at, level: 'info', provider: 'codex', text: 'Context compacted' }
-    case 'enteredReviewMode':
-      return { kind: 'notice', id, ts: at, level: 'info', provider: 'codex', text: 'Codex started a code review' }
-    case 'exitedReviewMode':
-      return { kind: 'notice', id, ts: at, level: 'info', provider: 'codex', text: 'Code review finished' }
+    case 'enteredReviewMode': {
+      const label = typeof item.review === 'string' ? item.review.trim() : ''
+      return { kind: 'notice', id, ts: at, level: 'info', provider: 'codex', text: label ? `Reviewing ${label}` : 'Codex started a code review' }
+    }
+    case 'exitedReviewMode': {
+      // The finished review (findings and verdict) is Codex's answer for this turn.
+      const review = typeof item.review === 'string' ? item.review.trim() : ''
+      if (!review) return { kind: 'notice', id, ts: at, level: 'info', provider: 'codex', text: 'Code review finished' }
+      const answer: AssistantItem = { kind: 'assistant', id, ts: at, provider: 'codex', model: ctx.model, text: review }
+      return answer
+    }
     default:
       return null
   }

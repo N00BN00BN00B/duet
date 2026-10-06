@@ -242,3 +242,40 @@ export function Chip({ children, tone = 'neutral', title }: { children: ReactNod
     </span>
   )
 }
+
+/** A range slider in the app's style. */
+export function Slider({ value, min, max, step = 0.05, onChange, label, format }: { value: number; min: number; max: number; step?: number; onChange: (v: number) => void; label: string; format?: (v: number) => string }) {
+  const pct = ((value - min) / (max - min)) * 100
+  return (
+    <label className="flex items-center gap-3">
+      <span className="w-24 shrink-0 text-[12px] text-fg-2">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="duet-range h-5 flex-1"
+        style={{ '--fill': `${pct}%` } as React.CSSProperties}
+      />
+      <span className="w-10 shrink-0 text-right text-[11.5px] tabular-nums text-fg-3">{format ? format(value) : value.toFixed(2)}</span>
+    </label>
+  )
+}
+
+/** A colour well with its hex value. */
+export function ColorField({ value, onChange, label }: { value: string; onChange: (v: string) => void; label: string }) {
+  return (
+    <label className="group/color flex min-w-0 items-center gap-2 rounded-lg border border-line bg-surface-2 py-1 pl-1 pr-2 hover:border-line-strong">
+      <span className="relative h-6 w-6 shrink-0 overflow-hidden rounded-md ring-1 ring-line-strong" style={{ background: value }}>
+        <input type="color" value={value.slice(0, 7)} aria-label={label} onChange={(e) => onChange(e.target.value)} className="absolute inset-0 h-full w-full cursor-pointer opacity-0" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[11px] text-fg-3">{label}</span>
+        <span className="block font-mono text-[11.5px] text-fg-2">{value.slice(0, 7)}</span>
+      </span>
+    </label>
+  )
+}

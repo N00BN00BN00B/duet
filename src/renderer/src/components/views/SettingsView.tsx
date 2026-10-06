@@ -1,12 +1,12 @@
-import { useState } from 'react'
-import type { ProviderId, ThemePref } from '@shared/types'
+import { useEffect, useState } from 'react'
+import type { CliStatus, ProviderId, StorageStats } from '@shared/types'
 import { ACCESS_MODES, PROVIDER_LABEL, PROVIDERS } from '@shared/types'
 import { duet } from '@/lib/api'
-import { resetsIn, tildify } from '@/lib/format'
-import { refreshProviders, saveSettings, useApp } from '@/state/store'
+import { formatBytes, resetsIn, timeAgo, tildify } from '@/lib/format'
+import { connectProvider, refreshProviders, saveSettings, setView, syncAllChats, toast, toastError, useApp } from '@/state/store'
 import { DuetMark, ProviderLogo } from '../brand'
 import { runInTerminal } from '../panels/TerminalDrawer'
-import { IconExternal, IconFolder, IconMonitor, IconMoon, IconRefresh, IconSun, IconTerminal, IconWarning, Spinner } from '../icons'
+import { IconExternal, IconFolder, IconHardDrive, IconLogin, IconPalette, IconRefresh, IconTerminal, IconTrash, IconWarning, Spinner } from '../icons'
 import { Button, Chip, Kbd, Meter, Segmented, Switch, inputClass } from '../ui/primitives'
 import { modelLabel } from '../composer/pickers'
 import { Card, Page, Row, Section } from './Page'
@@ -23,8 +23,7 @@ function AgentCard({ id }: { id: ProviderId }) {
     await refreshProviders(id)
     setRefreshing(false)
   }
-  const bin = status?.binaryPath ? `"${status.binaryPath}"` : id
-  const loginCommand = id === 'claude' ? `${bin} auth login` : `${bin} login`
+  const connecting = useApp((s) => s.connecting === id)
   const installCommand = id === 'claude' ? 'curl -fsSL https://claude.ai/install.sh | bash' : 'npm install -g @openai/codex'
   const models = status?.models ?? []
   const defaultModel = settings?.defaultModels[id]
@@ -57,8 +56,8 @@ function AgentCard({ id }: { id: ProviderId }) {
           Check again
         </Button>
         {status?.installed && (
-          <Button size="sm" variant="secondary" icon={<IconTerminal size={13} />} onClick={() => runInTerminal(loginCommand)}>
-            {status.loggedIn === false ? 'Sign in' : 'Switch account'}
+          <Button size="sm" variant={status.loggedIn === false ? 'accent' : 'secondary'} icon={connecting ? <Spinner size={13} /> : <IconLogin size={13} />} onClick={() => void connectProvider(id)} data-testid={`connect-button-${id}`}>
+            {connecting ? 'Waiting…' : status.loggedIn === false ? 'Sign in' : 'Switch account'}
           </Button>
         )}
       </div>
@@ -196,27 +195,20 @@ export function SettingsView() {
       <Section title="Appearance">
         <Card>
           <Row>
-            <div className="flex-1 text-[13px]">Theme</div>
-            <div className="w-[260px] max-w-full">
-              <Segmented<ThemePref>
-                value={settings.theme}
-                onChange={(v) => void saveSettings({ theme: v })}
-                options={[
-                  { value: 'system', label: 'System', icon: <IconMonitor size={12} /> },
-                  { value: 'dark', label: 'Dark', icon: <IconMoon size={12} /> },
-                  { value: 'light', label: 'Light', icon: <IconSun size={12} /> }
-                ]}
-              />
+            <div className="flex-1">
+              <div className="text-[13px]">Themes, colours, layout and personality</div>
+              <div className="text-[11.5px] text-fg-3">All in Customize — including “describe a look” and your agents' personality.</div>
             </div>
-          </Row>
-          <Row>
-            <div className="flex-1 text-[13px]">Text size</div>
-            <div className="w-[260px] max-w-full">
-              <Segmented value={String(settings.fontSize)} onChange={(v) => void saveSettings({ fontSize: Number(v) })} options={['13', '14', '15', '16'].map((v) => ({ value: v, label: `${v}px` }))} />
-            </div>
+            <Button size="sm" variant="secondary" icon={<IconPalette size={13} />} onClick={() => setView('customize')}>
+              Open Customize
+            </Button>
           </Row>
         </Card>
       </Section>
+
+      <ChatsSection />
+      <CommandLineSection />
+      <StorageSection />
 
       <Section title="Browser">
         <Card>
@@ -271,5 +263,158 @@ export function SettingsView() {
         </Card>
       </Section>
     </Page>
+  )
+}
+
+function ChatsSection() {
+  const settings = useApp((s) => s.settings)
+  const syncing = useApp((s) => s.chatSyncing)
+  const synced = useApp((s) => Object.values(s.threads).filter((t) => t.origin).length)
+  if (!settings) return null
+  return (
+    <Section title="Chats" description="Every conversation you've had in Claude Code or Codex can live in Duet's sidebar, with its original date. Messages are read from them when you open one, so nothing gets copied until then.">
+      <Card>
+        <Row>
+          <div className="flex-1">
+            <div className="text-[13px]">Keep Claude Code & Codex chats in sync</div>
+            <div className="text-[11.5px] text-fg-3">
+              {settings.lastChatSync ? `Last synced ${timeAgo(settings.lastChatSync)} ago · ${synced} chats from Claude Code and Codex` : 'New chats from the Claude Code and Codex apps show up on their own.'}
+            </div>
+          </div>
+          <Button size="sm" variant="ghost" icon={syncing ? <Spinner size={13} /> : <IconRefresh size={13} />} onClick={() => void syncAllChats()} data-testid="sync-now">
+            Sync now
+          </Button>
+          <Switch checked={settings.chatSync === 'auto'} onChange={(v) => void saveSettings({ chatSync: v ? 'auto' : 'off' })} label="Keep chats in sync" />
+        </Row>
+      </Card>
+    </Section>
+  )
+}
+
+function CommandLineSection() {
+  const [status, setStatus] = useState<CliStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    void duet.cli.status().then(setStatus).catch(() => undefined)
+  }, [])
+  const run = async (fn: () => Promise<CliStatus>, done: string) => {
+    setBusy(true)
+    try {
+      const next = await fn()
+      setStatus(next)
+      toast(done, 'success')
+    } catch (error) {
+      toastError(error)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Section title="Command line" description="Start Duet from any terminal: open a project, or hand an agent a task without leaving the shell.">
+      <Card>
+        <Row>
+          <IconTerminal size={16} className="text-fg-3" />
+          <div className="flex-1">
+            <div className="text-[13px]">
+              <span className="font-mono">duet</span> command {status?.installed ? <Chip tone="ok">installed</Chip> : <Chip>not installed</Chip>}
+            </div>
+            <div className="text-[11.5px] text-fg-3">{status ? `${status.installed ? 'At' : 'Goes in'} ${status.path}${status.onPath ? '' : ' — add that folder to your PATH'}` : 'Checking…'}</div>
+          </div>
+          {status?.installed ? (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => duet.cli.uninstall(), 'Removed the duet command.')}>
+              Remove
+            </Button>
+          ) : (
+            <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(() => duet.cli.install(), 'Installed — try `duet .` in a project folder.')} data-testid="cli-install">
+              Install
+            </Button>
+          )}
+        </Row>
+        <div className="space-y-1 px-4 py-3 font-mono text-[12px] text-fg-2">
+          {[
+            ['duet .', 'open this folder in Duet'],
+            ['duet "fix the failing test"', 'start a chat here and send it'],
+            ['duet --codex -p "review my changes"', 'pick the agent'],
+            ['duet --list', 'recent chats'],
+            ['duet --usage', 'limits at a glance']
+          ].map(([cmd, what]) => (
+            <div key={cmd} className="flex gap-3">
+              <span className="selectable text-fg">{cmd}</span>
+              <span className="text-fg-3"># {what}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </Section>
+  )
+}
+
+function StorageSection() {
+  const [stats, setStats] = useState<StorageStats | null>(null)
+  const [busy, setBusy] = useState(false)
+  const keep = () => {
+    const s = useApp.getState()
+    return [...Object.values(s.drafts), ...Object.values(s.queued)].flatMap((d) => d.attachments.map((a) => a.path))
+  }
+  const load = () => void duet.storage.stats(keep()).then(setStats).catch(() => undefined)
+  useEffect(load, [])
+  return (
+    <Section title="Storage" description="Duet keeps its own data small: synced chats aren't copied until you open them, and pictures are stored once even when they appear in many chats.">
+      <Card>
+        {!stats ? (
+          <div className="flex justify-center py-6 text-fg-3">
+            <Spinner size={16} />
+          </div>
+        ) : (
+          <>
+            {[
+              ['Chats', `${stats.threads.count} saved`, stats.threads.bytes],
+              ['Attachments & pictures', `${stats.attachments.count} files`, stats.attachments.bytes],
+              ['Safety copies from Sync', `${stats.safetyCopies.count} files`, stats.safetyCopies.bytes],
+              ['Caches', 'usage numbers', stats.caches.bytes],
+              ['Logs', 'kept small automatically', stats.logs.bytes]
+            ].map(([label, hint, bytes]) => (
+              <Row key={label as string}>
+                <div className="flex-1">
+                  <div className="text-[13px]">{label}</div>
+                  <div className="text-[11.5px] text-fg-3">{hint}</div>
+                </div>
+                <span className="text-[12.5px] tabular-nums text-fg-2">{formatBytes(bytes as number)}</span>
+              </Row>
+            ))}
+            <Row>
+              <IconHardDrive size={16} className="text-fg-3" />
+              <div className="flex-1">
+                <div className="text-[13px]">Clean up</div>
+                <div className="text-[11.5px] text-fg-3">
+                  {stats.unused.count ? `${stats.unused.count} unused attachments (${formatBytes(stats.unused.bytes)}) and safety copies older than 30 days go to the Trash.` : 'Nothing to clean up right now.'}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={busy ? <Spinner size={13} /> : <IconTrash size={13} />}
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true)
+                  try {
+                    const res = await duet.storage.clean(keep())
+                    toast(res.files ? `Moved ${res.files} files (${formatBytes(res.bytes)}) to the Trash.` : 'Nothing to clean up.', 'success')
+                    load()
+                  } catch (error) {
+                    toastError(error)
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+                data-testid="storage-clean"
+              >
+                Clean up
+              </Button>
+            </Row>
+          </>
+        )}
+      </Card>
+    </Section>
   )
 }

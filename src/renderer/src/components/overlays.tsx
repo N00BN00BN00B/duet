@@ -3,9 +3,9 @@ import { createPortal } from 'react-dom'
 import { PROVIDER_LABEL } from '@shared/types'
 import { duet } from '@/lib/api'
 import { projectName, timeAgo } from '@/lib/format'
-import { dismissToast, goHome, openBrowser, openThread, setView, switchProvider, togglePanel, useApp } from '@/state/store'
+import { dismissToast, goHome, openBrowser, openThread, setView, switchProvider, syncAllChats, togglePanel, useApp } from '@/state/store'
 import { ProviderLogo } from './brand'
-import { IconBackup, IconCheck, IconDiff, IconGlobe, IconHistory, IconInfo, IconPlug, IconPlus, IconSearch, IconSettings, IconSidebar, IconSync, IconTerminal, IconWarning, IconX } from './icons'
+import { IconBackup, IconCheck, IconDiff, IconGauge, IconGlobe, IconHistory, IconInfo, IconPalette, IconPlug, IconPlus, IconSearch, IconSettings, IconSidebar, IconSync, IconTerminal, IconWarning, IconX } from './icons'
 
 interface PaletteItem {
   id: string
@@ -34,14 +34,17 @@ export function CommandPalette() {
 
   const items = useMemo<PaletteItem[]>(() => {
     const actions: PaletteItem[] = [
-      { id: 'new', group: 'Actions', label: 'New thread', hint: '⌘N', icon: <IconPlus size={15} />, run: () => goHome() },
+      { id: 'new', group: 'Actions', label: 'New chat', hint: '⌘N', icon: <IconPlus size={15} />, run: () => goHome() },
+      { id: 'sync-chats', group: 'Actions', label: 'Sync Claude Code & Codex chats into the sidebar', icon: <IconHistory size={15} />, run: () => void syncAllChats() },
       { id: 'claude', group: 'Actions', label: 'Switch to Claude', hint: '⌘1', icon: <ProviderLogo provider="claude" size={14} />, run: () => void switchProvider('claude') },
       { id: 'codex', group: 'Actions', label: 'Switch to Codex', hint: '⌘2', icon: <ProviderLogo provider="codex" size={14} />, run: () => void switchProvider('codex') },
       { id: 'browser', group: 'Actions', label: 'Open browser', hint: '⌘⇧B', icon: <IconGlobe size={15} />, run: () => openBrowser() },
       { id: 'changes', group: 'Actions', label: 'Show changes', hint: '⌘⇧D', icon: <IconDiff size={15} />, run: () => togglePanel('changes') },
       { id: 'terminal', group: 'Actions', label: 'Toggle terminal', hint: '⌘J', icon: <IconTerminal size={15} />, run: () => useApp.setState((s) => ({ terminalOpen: !s.terminalOpen })) },
       { id: 'sidebar', group: 'Actions', label: 'Toggle sidebar', hint: '⌘B', icon: <IconSidebar size={15} />, run: () => useApp.setState((s) => ({ sidebarOpen: !s.sidebarOpen })) },
-      { id: 'history', group: 'Go to', label: 'History — import Claude & Codex chats', icon: <IconHistory size={15} />, run: () => setView('history') },
+      { id: 'usage', group: 'Go to', label: 'Usage — limits and tokens', icon: <IconGauge size={15} />, run: () => setView('usage') },
+      { id: 'customize', group: 'Go to', label: 'Customize — themes, colours, personality', icon: <IconPalette size={15} />, run: () => setView('customize') },
+      { id: 'history', group: 'Go to', label: 'Chat history — browse and import', icon: <IconHistory size={15} />, run: () => setView('history') },
       { id: 'mcp', group: 'Go to', label: 'MCP servers', icon: <IconPlug size={15} />, run: () => setView('mcp') },
       { id: 'sync', group: 'Go to', label: 'Sync Claude ⇄ Codex', icon: <IconSync size={15} />, run: () => setView('sync') },
       { id: 'backups', group: 'Go to', label: 'Backups', icon: <IconBackup size={15} />, run: () => setView('backups') },
@@ -54,7 +57,7 @@ export function CommandPalette() {
       .map((t) => ({
         id: `t-${t.id}`,
         group: 'Threads',
-        label: t.title,
+        label: `${PROVIDER_LABEL[t.provider]} · ${t.title}`,
         hint: `${projectName(t.cwd)} · ${timeAgo(t.updatedAt)}`,
         icon: <ProviderLogo provider={t.provider} size={13} />,
         run: () => void openThread(t.id)
@@ -145,6 +148,18 @@ export function Toasts() {
         <div key={t.id} className="anim-toast pointer-events-auto flex items-start gap-2.5 rounded-xl border border-line-strong bg-surface px-3.5 py-2.5 text-[12.5px] leading-relaxed shadow-[var(--pop-shadow)]" role="status">
           <span className="mt-[2px] shrink-0">{t.level === 'error' ? <IconWarning size={14} className="text-bad" /> : t.level === 'success' ? <IconCheck size={14} className="text-ok" /> : <IconInfo size={14} className="text-info" />}</span>
           <span className="selectable min-w-0 flex-1 break-words">{t.text}</span>
+          {t.action && (
+            <button
+              type="button"
+              onClick={() => {
+                t.action!.run()
+                dismissToast(t.id)
+              }}
+              className="press shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-medium text-accent hover:bg-hover"
+            >
+              {t.action.label}
+            </button>
+          )}
           <button type="button" aria-label="Dismiss" onClick={() => dismissToast(t.id)} className="shrink-0 text-fg-3 hover:text-fg">
             <IconX size={12} />
           </button>
@@ -172,57 +187,6 @@ export function Lightbox() {
         <button type="button" className="text-white/70 hover:text-white" onClick={(e) => (e.stopPropagation(), void duet.app.reveal(path))}>
           Show in Finder
         </button>
-      </div>
-    </div>,
-    document.body
-  )
-}
-
-export function Onboarding() {
-  const settings = useApp((s) => s.settings)
-  const providers = useApp((s) => s.providers)
-  if (!settings || settings.onboarded) return null
-  return createPortal(
-    <div className="anim-fade fixed inset-0 z-[72] flex items-center justify-center bg-black/50 p-6 backdrop-blur-[2px]">
-      <div className="anim-pop w-[520px] max-w-full rounded-2xl border border-line-strong bg-surface p-6 shadow-[var(--pop-shadow)]">
-        <h2 className="text-[18px] font-semibold tracking-[-0.01em]">Welcome to Duet</h2>
-        <p className="mt-2 text-[13px] leading-relaxed text-fg-2">
-          Duet runs Claude Code and Codex — the ones already on your Mac, with your own subscriptions — in one window. Start a thread with either agent and switch any time; the other one picks up the conversation where it left off.
-        </p>
-        <div className="mt-4 space-y-2">
-          {(['claude', 'codex'] as const).map((p) => {
-            const st = providers[p]
-            return (
-              <div key={p} className="flex items-center gap-3 rounded-xl border border-line px-3 py-2.5">
-                <ProviderLogo provider={p} size={16} />
-                <span className="flex-1 text-[13px] font-medium">{PROVIDER_LABEL[p]}</span>
-                <span className={`text-[12px] ${!st ? 'text-fg-3' : st.installed ? (st.loggedIn === false ? 'text-warn' : 'text-ok') : 'text-bad'}`}>
-                  {!st ? 'Checking…' : !st.installed ? 'Not found — see Settings' : st.loggedIn === false ? 'Installed · signed out' : `Ready${st.version ? ` · ${/^\d/.test(st.version) ? 'v' : ''}${st.version}` : ''}`}
-                </span>
-              </div>
-            )
-          })}
-        </div>
-        <ul className="mt-4 space-y-1.5 text-[12.5px] text-fg-2">
-          <li>• History imports every Claude and Codex conversation you already have.</li>
-          <li>• MCP and Sync keep both agents set up the same way.</li>
-          <li>• Backups snapshot all of it into one archive.</li>
-        </ul>
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              void duet.settings.update({ onboarded: true }).then((s) => useApp.setState({ settings: s }))
-              setView('history')
-            }}
-            className="press h-8 rounded-lg px-3.5 text-[13px] font-medium text-fg-2 hover:bg-hover hover:text-fg"
-          >
-            Import my history
-          </button>
-          <button type="button" onClick={() => void duet.settings.update({ onboarded: true }).then((s) => useApp.setState({ settings: s }))} className="press h-8 rounded-lg bg-accent px-3.5 text-[13px] font-medium text-white hover:brightness-110" data-testid="onboarding-start">
-            Start building
-          </button>
-        </div>
       </div>
     </div>,
     document.body

@@ -1,15 +1,4 @@
-import type {
-  AccessMode,
-  ApprovalDecision,
-  ApprovalStatus,
-  Attachment,
-  ContextUsage,
-  ProviderId,
-  ProviderStatus,
-  RateWindow,
-  SlashCommand,
-  TimelineItem
-} from '@shared/types'
+import type { AccessMode, ApprovalDecision, ApprovalStatus, Attachment, ContextUsage, ProviderId, ProviderStatus, RateWindow, SlashCommand, TimelineItem, SkillRef, ReviewTarget } from '@shared/types'
 
 export interface TurnRequest {
   threadId: string
@@ -22,6 +11,14 @@ export interface TurnRequest {
   /** Final prompt text, including any hand-off context. */
   text: string
   attachments: Attachment[]
+  /** Personality / standing instructions for the agent (Codex developer instructions, Claude system prompt). */
+  instructions?: string
+  /** Codex skills to invoke with this message. */
+  skills?: SkillRef[]
+  /** Codex: run a code review instead of a normal turn. */
+  review?: ReviewTarget
+  /** Codex Fast mode (priority service tier). */
+  fast?: boolean
 }
 
 export type TurnEndStatus = 'completed' | 'interrupted' | 'failed'
@@ -38,6 +35,7 @@ export type RuntimeEvent =
       durationMs?: number
       inputTokens?: number
       outputTokens?: number
+      cacheReadTokens?: number
       model?: string
     }
   | { type: 'context'; usage: ContextUsage }
@@ -65,6 +63,10 @@ export interface ProviderAdapter {
   interrupt(threadId: string): Promise<void>
   /** Stop pressed while the turn is still starting: abandon the start if that's possible. */
   cancelStart?(threadId: string): void
+  /** Native context compaction, as a turn of its own. */
+  compact?(threadId: string, emit: Emit): Promise<void>
+  /** One question in a throwaway session that isn't saved to the agent's history; returns the answer text. */
+  oneShot?(prompt: string, opts?: { outputSchema?: unknown; timeoutMs?: number }): Promise<string>
   /** Reports whether a turn is running for the thread. */
   isActive?(threadId: string): boolean
   /** Answers a pending approval. Returns false when the request is no longer pending. */

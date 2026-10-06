@@ -10,6 +10,14 @@ files:
   - "!**/*.map"
 asarUnpack:
   - node_modules/node-pty/**
+extraResources:
+  # The `duet` command line, run with Duet's own runtime (see Settings → Command line).
+  - from: resources/cli.js
+    to: cli.js
+protocols:
+  - name: Duet
+    schemes:
+      - duet
 npmRebuild: false
 afterPack: scripts/after-pack.cjs
 mac:

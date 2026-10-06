@@ -4,6 +4,7 @@ import { unifiedDiff } from '@shared/diff'
 import { deflateSync } from 'node:zlib'
 import type { Emit, ProviderAdapter, TurnRequest } from '../types'
 import { saveToolImage } from '../../util/toolImages'
+import { themeFromPrompt } from '@shared/theme'
 
 interface Run {
   nativeId: string
@@ -225,6 +226,16 @@ export class FakeAdapter implements ProviderAdapter {
 
   isActive(threadId: string): boolean {
     return this.runs.has(threadId)
+  }
+
+  /** Demo answers for one-off questions: a theme for "Design a theme…", an echo otherwise. */
+  async oneShot(prompt: string): Promise<string> {
+    await new Promise((r) => setTimeout(r, Math.max(1, 300 / this.speed)))
+    const asked = /Design a theme for this request: "([^"]*)"/.exec(prompt)
+    if (!asked) return `${PROVIDER_LABEL[this.id]} (demo) read: ${prompt.slice(0, 80)}`
+    const theme = themeFromPrompt(asked[1])
+    const { id: _id, source: _source, prompt: _prompt, ...rest } = theme
+    return JSON.stringify({ ...rest, name: `${theme.name} (${PROVIDER_LABEL[this.id]})` })
   }
 
   release(threadId: string): void {

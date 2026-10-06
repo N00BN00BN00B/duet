@@ -3,7 +3,7 @@ import type { HistoryEntry, ProviderId, ThreadMeta } from '@shared/types'
 import { PROVIDER_LABEL, otherProvider } from '@shared/types'
 import { duet } from '@/lib/api'
 import { projectName, shortModel, timeAgo } from '@/lib/format'
-import { openThread, switchProvider, toast, toastError, useApp } from '@/state/store'
+import { openThread, switchProvider, syncAllChats, toastError, useApp } from '@/state/store'
 import { ProviderLogo } from '../brand'
 import { IconArrowRight, IconCheck, IconDownload, IconHistory, IconRefresh, IconSearch, Spinner } from '../icons'
 import { Button, Chip, EmptyState, Segmented, inputClass } from '../ui/primitives'
@@ -16,7 +16,7 @@ export function HistoryView() {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
-  const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null)
+  const syncing = useApp((s) => s.chatSyncing)
 
   const load = useCallback(async (p: ProviderId) => {
     setLoading(true)
@@ -60,25 +60,6 @@ export function HistoryView() {
     }
   }
 
-  const importAll = async () => {
-    const pending = list.filter((e) => !e.importedThreadId)
-    if (!pending.length) return
-    setBulk({ done: 0, total: pending.length })
-    let ok = 0
-    for (const entry of pending) {
-      try {
-        const meta = await duet.history.import(entry.provider, entry.nativeId)
-        markImported(entry, meta)
-        ok++
-      } catch {
-        // keep going
-      }
-      setBulk((b) => (b ? { ...b, done: b.done + 1 } : b))
-    }
-    setBulk(null)
-    toast(`Imported ${ok} of ${pending.length} conversations`, ok === pending.length ? 'success' : 'info')
-  }
-
   const counts = { claude: entries.claude?.length, codex: entries.codex?.length }
   const notImported = list.filter((e) => !e.importedThreadId).length
   return (
@@ -89,8 +70,15 @@ export function HistoryView() {
       actions={
         <>
           {notImported > 0 && (
-            <Button size="sm" variant="secondary" icon={<IconDownload size={13} />} disabled={!!bulk} onClick={() => void importAll()}>
-              {bulk ? `Importing ${bulk.done}/${bulk.total}` : `Import all (${notImported})`}
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={syncing ? <Spinner size={13} /> : <IconDownload size={13} />}
+              disabled={syncing}
+              onClick={() => void syncAllChats().then(() => load(provider))}
+              data-testid="history-sync-all"
+            >
+              {`Add all to sidebar (${notImported})`}
             </Button>
           )}
           <Button size="sm" variant="ghost" icon={loading ? <Spinner size={13} /> : <IconRefresh size={13} />} onClick={() => void load(provider)}>

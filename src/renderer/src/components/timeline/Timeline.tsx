@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ProviderId, ThreadMeta, TimelineItem } from '@shared/types'
 import { buildBlocks, type Block } from '@/lib/timeline'
+import { useApp } from '@/state/store'
 import { IconArrowRight } from '../icons'
 import { AgentHeader, ApprovalRecord, AssistantMessage, Notice, SwitchDivider, ThinkingIndicator, TurnFooter, UserMessage, WorkGroup } from './blocks'
 
@@ -10,6 +11,7 @@ export function Timeline({ meta, items }: { meta: ThreadMeta; items: TimelineIte
   const stick = useRef(true)
   const [showJump, setShowJump] = useState(false)
   const blocks = useMemo(() => buildBlocks(items), [items])
+  const showDetails = useApp((s) => s.settings?.showTurnDetails ?? true)
   const running = meta.status === 'running' || meta.status === 'approval'
   const lastUserIndex = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'user') return i
@@ -60,10 +62,10 @@ export function Timeline({ meta, items }: { meta: ThreadMeta; items: TimelineIte
   return (
     <div className="relative min-h-0 flex-1">
       <div ref={scrollRef} onScroll={onScroll} className="scroll-y h-full" data-testid="timeline">
-        <div ref={contentRef} className="mx-auto flex w-full max-w-[760px] flex-col gap-3.5 px-6 pb-10 pt-6">
+        <div ref={contentRef} className="mx-auto flex w-full max-w-[var(--chat-width,760px)] flex-col gap-3.5 px-6 pb-10 pt-6">
           {blocks.map((block) => (
             <div key={block.key} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 80px' }}>
-              {renderBlock(block, running)}
+              {renderBlock(block, running, showDetails)}
             </div>
           ))}
           {showThinking && <ThinkingIndicator provider={turnProvider} />}
@@ -85,7 +87,7 @@ export function Timeline({ meta, items }: { meta: ThreadMeta; items: TimelineIte
   )
 }
 
-function renderBlock(block: Block, running: boolean) {
+function renderBlock(block: Block, running: boolean, showDetails: boolean) {
   if (block.type === 'work') {
     return (
       <div>
@@ -107,7 +109,7 @@ function renderBlock(block: Block, running: boolean) {
     case 'notice':
       return <Notice item={item} />
     case 'turn':
-      return <TurnFooter item={item} />
+      return showDetails ? <TurnFooter item={item} /> : null
     default:
       return null
   }

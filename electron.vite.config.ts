@@ -39,7 +39,8 @@ export default defineConfig({
     resolve: { alias: { '@shared': shared } },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        // The usage scanner runs in a worker thread so reading big histories never blocks the app.
+        input: { index: resolve(__dirname, 'src/main/index.ts'), usageWorker: resolve(__dirname, 'src/main/features/usageWorker.ts') }
       }
     }
   },

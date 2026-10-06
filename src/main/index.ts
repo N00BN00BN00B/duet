@@ -1,11 +1,12 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, net, Notification, protocol, session, shell, webContents, type MenuItemConstructorOptions } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { EVENT_CHANNEL, FILE_PROTOCOL } from '@shared/api'
-import type { AccessMode, DuetEvent, McpEditSource, McpServerConfig, ProviderId, Settings, SyncAction, ThemePref, ThreadMeta } from '@shared/types'
+import type { AccessMode, DuetEvent, HistoryEntry, McpEditSource, McpServerConfig, ProviderId, SendInput, Settings, SyncAction, ThemePref, ThreadMeta, TimelineItem } from '@shared/types'
 import { PROVIDERS } from '@shared/types'
 import { truncate } from '@shared/paths'
 import { findBinary, getEnv, loadShellEnv, runCommand } from './env'
@@ -25,13 +26,31 @@ import { listClaudeSessions, listCodexThreads, loadClaudeSession, loadCodexThrea
 import { listMcp, mergeStatus, parseMcpJson, removeClaudeServer, removeCodexServer, writeClaudeServer, writeCodexServer, type McpWriteDeps } from './features/mcp'
 import { applySync, scanSync } from './features/sync'
 import { createBackup, defaultContext, describeSets, listBackups, restoreBackup } from './features/backup'
+import { oldSafetyCopies, storageStats, unusedAttachments, type StorageContext } from './features/storage'
+import { cliStatus, installCli, uninstallCli } from './features/cli'
+import { parseDeepLink } from './features/deeplink'
+import { planChatSync } from './features/chatSync'
+import { generateTheme, type ThemeAgent } from './features/themeGen'
+import { UsageService } from './features/usage'
+import { readClaudePersonality } from './features/personality'
+import { claudeHome, codexHome } from './features/history'
 import { fakeMcpDeps } from './features/fakeMcp'
 import { initLogger, logLine } from './logger'
 import { saveToolImage } from './util/toolImages'
+import { findTheme, normalizeTheme, parseColor, resolveTheme, toHex, type ThemeSpec } from '@shared/theme'
 
 protocol.registerSchemesAsPrivileged([{ scheme: FILE_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
 const FAKE = process.env.DUET_FAKE_PROVIDERS === '1'
+
+// duet:// links (from the `duet` command) can arrive before Duet has finished starting.
+const pendingLinks: string[] = []
+let linksReady = false
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  if (linksReady) void handleDeepLink(url)
+  else pendingLinks.push(url)
+})
 if (process.env.DUET_USER_DATA) app.setPath('userData', resolve(process.env.DUET_USER_DATA))
 
 const log = (...args: unknown[]) => {
@@ -48,6 +67,7 @@ let store: Store
 let orchestrator: Orchestrator
 let adapters: Record<ProviderId, ProviderAdapter>
 let terminals: TerminalManager
+let usage: UsageService
 let quitting = false
 
 function broadcast(event: DuetEvent): void {
@@ -94,7 +114,8 @@ function createWindow(): void {
     title: 'Duet',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0c0c0e' : '#f7f7f8',
+    // The theme's own background, so the window never flashes a different colour while loading.
+    backgroundColor: resolveTheme(store.settings, nativeTheme.shouldUseDarkColors).colors.bg,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -157,6 +178,7 @@ function createWindow(): void {
 
 function focusWindow(): void {
   if (!mainWindow) createWindow()
+  else if (process.env.DUET_E2E === '1') mainWindow.showInactive() // tests never take the keyboard from whatever you're typing in
   else {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
@@ -195,6 +217,19 @@ async function refreshProviders(force = false, only?: ProviderId): Promise<void>
       }
     })
   )
+  writeLimitsCache()
+}
+
+let codexAccountCache: { at: number; value: Awaited<ReturnType<CodexAdapter['accountUsage']>> } | null = null
+
+/** Codex's account-wide usage numbers, fetched at most every 5 minutes. */
+async function codexAccount() {
+  const codex = adapters.codex
+  if (!(codex instanceof CodexAdapter)) return null
+  if (codexAccountCache && Date.now() - codexAccountCache.at < 5 * 60_000) return codexAccountCache.value
+  const value = await codex.accountUsage()
+  codexAccountCache = { at: Date.now(), value }
+  return value
 }
 
 function mcpDeps(): McpWriteDeps {
@@ -245,6 +280,134 @@ async function runAutoBackupIfDue(): Promise<void> {
   }
 }
 
+// ---------- chats folder, deep links, chat sync ----------
+
+const chatsDir = () => join(app.getPath('userData'), 'chats')
+
+/** Secret the `duet` command passes along, so only this user's terminal can auto-send prompts. */
+function cliToken(): string {
+  const file = join(app.getPath('userData'), 'cli-token')
+  try {
+    const existing = readFileSync(file, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(existing)) return existing
+  } catch {
+    // first run
+  }
+  const token = randomBytes(32).toString('hex')
+  writeFileSync(file, token, { mode: 0o600 })
+  return token
+}
+
+async function handleDeepLink(raw: string): Promise<void> {
+  const link = parseDeepLink(raw, cliToken())
+  if (!link) return
+  focusWindow()
+  if (link.kind === 'thread') return broadcast({ type: 'navigate', view: `thread:${link.id}` })
+  if (link.kind === 'view') return broadcast({ type: 'navigate', view: link.view })
+  const cwd = link.cwd && existsSync(link.cwd) && statSync(link.cwd).isDirectory() ? link.cwd : undefined
+  if (cwd && cwd !== chatsDir() && !store.settings.projects.includes(cwd)) store.updateSettings({ projects: [cwd, ...store.settings.projects] })
+  if (link.prompt && link.send && cwd) {
+    const meta = orchestrator.create({ cwd, provider: link.provider ?? store.settings.defaultProvider, model: link.model })
+    broadcast({ type: 'navigate', view: `thread:${meta.id}` })
+    await orchestrator.send(meta.id, { text: link.prompt, attachments: [] }).catch((error) => broadcast({ type: 'toast', level: 'error', text: (error as Error).message }))
+    return
+  }
+  broadcast({ type: 'compose', cwd, text: link.prompt, provider: link.provider })
+}
+
+const saveImage = (data: string, mime: string) => saveToolImage(store.attachmentsDir, data, mime)
+
+function codexRequest() {
+  const codex = adapters.codex
+  return codex instanceof CodexAdapter ? <T>(m: string, p?: unknown, t?: number) => codex.rpcRequest<T>(m, p, t) : null
+}
+
+/** Reads a synced chat's messages from where they live (Claude Code transcript / Codex thread). */
+async function loadSource(meta: ThreadMeta): Promise<TimelineItem[]> {
+  if (!meta.origin) return []
+  if (meta.origin.provider === 'claude') return loadClaudeSession(meta.origin.nativeId, saveImage).items
+  const request = codexRequest()
+  if (!request) throw new Error('Codex is not available')
+  return (await loadCodexThread(request, meta.origin.nativeId, saveImage)).items
+}
+
+let syncing: Promise<{ added: number; updated: number; total: number }> | null = null
+
+/** Lists every Claude Code and Codex chat in the sidebar; messages load when a chat is opened. */
+function syncChats(): Promise<{ added: number; updated: number; total: number }> {
+  if (syncing) return syncing
+  syncing = (async () => {
+    mkdirSync(chatsDir(), { recursive: true })
+    broadcast({ type: 'chat-sync', phase: 'running', added: 0, updated: 0, total: 0 })
+    const entries: HistoryEntry[] = [...listClaudeSessions()]
+    const request = codexRequest()
+    if (request && (await adapters.codex.status(false).catch(() => null))?.installed) {
+      try {
+        entries.push(...(await listCodexThreads(request, 2000)))
+      } catch (error) {
+        log('[sync] codex list failed', (error as Error).message)
+      }
+    }
+    const s = store.settings
+    const plan = planChatSync(orchestrator.list(), entries, { models: s.defaultModels, efforts: s.defaultEfforts, access: s.defaultAccess, fallbackCwd: chatsDir(), folderExists: (p) => existsSync(p) })
+    orchestrator.upsertSynced([...plan.added, ...plan.updated])
+    store.updateSettings({ lastChatSync: Date.now() })
+    const result = { added: plan.added.length, updated: plan.updated.length, total: entries.length }
+    broadcast({ type: 'chat-sync', phase: 'done', ...result })
+    return result
+  })().finally(() => {
+    syncing = null
+  })
+  return syncing
+}
+
+let lastAutoSync = 0
+function autoSyncChats(): void {
+  if (store.settings.chatSync !== 'auto' || Date.now() - lastAutoSync < 120_000) return
+  lastAutoSync = Date.now()
+  void syncChats().catch((error) => log('[sync]', (error as Error).message))
+}
+
+/** Remembers the latest limits for `duet --usage`. */
+function writeLimitsCache(): void {
+  void Promise.all(PROVIDERS.map(async (p) => [p, (await adapters[p].status(false).catch(() => null))?.limits ?? []] as const))
+    .then((pairs) => {
+      const dir = join(app.getPath('userData'), 'cache')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'limits.json'), JSON.stringify(Object.fromEntries(pairs)))
+    })
+    .catch(() => undefined)
+}
+
+function storageContext(): StorageContext {
+  const userData = app.getPath('userData')
+  return { threadsDir: store.threadsDir, attachmentsDir: store.attachmentsDir, safetyDir: join(userData, 'sync-backups'), logsDir: join(userData, 'logs'), cacheDir: join(userData, 'cache') }
+}
+
+async function themeAgents(): Promise<ThemeAgent[]> {
+  return Promise.all(
+    PROVIDERS.map(async (id) => {
+      const adapter = adapters[id]
+      const st = await adapter.status(false).catch(() => null)
+      return { id, ready: !!adapter.oneShot && !!st?.installed && st.loggedIn !== false, ask: (prompt: string, schema: unknown) => adapter.oneShot!(prompt, { outputSchema: schema, timeoutMs: 90_000 }) }
+    })
+  )
+}
+
+function cleanSendInput(input: SendInput): SendInput {
+  if (!input || typeof input.text !== 'string' || !Array.isArray(input.attachments)) throw new Error('Invalid message')
+  const out: SendInput = { text: input.text, attachments: input.attachments }
+  if (Array.isArray(input.skills)) out.skills = input.skills.filter((s) => s && typeof s.name === 'string' && typeof s.path === 'string').slice(0, 8)
+  const r = input.review
+  if (r && typeof r === 'object') {
+    if (r.type === 'uncommittedChanges') out.review = { type: 'uncommittedChanges' }
+    else if (r.type === 'baseBranch' && typeof r.branch === 'string' && r.branch.trim()) out.review = { type: 'baseBranch', branch: r.branch.trim() }
+    else if (r.type === 'commit' && typeof r.sha === 'string' && /^[0-9a-f]{4,40}$/i.test(r.sha)) out.review = { type: 'commit', sha: r.sha }
+    else if (r.type === 'custom' && typeof r.instructions === 'string' && r.instructions.trim()) out.review = { type: 'custom', instructions: r.instructions.trim().slice(0, 4000) }
+  }
+  return out
+}
+
 function relaunchSoon(delayMs: number): void {
   setTimeout(() => {
     void (async () => {
@@ -269,6 +432,12 @@ function lockDownBrowserSession(): void {
 // ---------- IPC handlers ----------
 
 const THEMES: ThemePref[] = ['system', 'dark', 'light']
+
+const CLAUDE_LOGIN_COMMAND = 'claude auth login'
+const INSTALL_COMMAND: Record<ProviderId, string> = {
+  claude: 'curl -fsSL https://claude.ai/install.sh | bash',
+  codex: 'npm install -g @openai/codex'
+}
 const ACCESS: AccessMode[] = ['plan', 'ask', 'auto', 'full']
 
 function sanitizeSettings(patch: Partial<Settings>): Partial<Settings> {
@@ -278,8 +447,34 @@ function sanitizeSettings(patch: Partial<Settings>): Partial<Settings> {
   if (patch.defaultModels && typeof patch.defaultModels === 'object') out.defaultModels = { ...store.settings.defaultModels, ...patch.defaultModels }
   if (patch.defaultEfforts && typeof patch.defaultEfforts === 'object') out.defaultEfforts = { ...store.settings.defaultEfforts, ...patch.defaultEfforts }
   if (patch.defaultAccess && ACCESS.includes(patch.defaultAccess)) out.defaultAccess = patch.defaultAccess
-  for (const key of ['sendWithEnter', 'notifications', 'sounds', 'includeAuthInBackups', 'onboarded'] as const) {
+  for (const key of ['sendWithEnter', 'notifications', 'sounds', 'includeAuthInBackups', 'onboarded', 'reduceMotion', 'backgroundEffects', 'sidebarAgentNames', 'showTurnDetails', 'usageIncludeOutside'] as const) {
     if (typeof patch[key] === 'boolean') out[key] = patch[key]
+  }
+  // Appearance: only known values, and themes only after they've been checked.
+  if (Array.isArray(patch.customThemes)) {
+    out.customThemes = patch.customThemes
+      .map((t) => normalizeTheme(t))
+      .filter((t): t is ThemeSpec => !!t)
+      .filter((t, i, list) => list.findIndex((x) => x.id === t.id) === i)
+      .slice(0, 60)
+  }
+  const knownTheme = (id: unknown) => typeof id === 'string' && !!findTheme(id, out.customThemes ?? store.settings.customThemes)
+  if (knownTheme(patch.darkTheme)) out.darkTheme = patch.darkTheme
+  if (knownTheme(patch.lightTheme)) out.lightTheme = patch.lightTheme
+  if (patch.accentMode && ['agent', 'theme', 'custom'].includes(patch.accentMode)) out.accentMode = patch.accentMode
+  if (typeof patch.accentColor === 'string' && parseColor(patch.accentColor)) out.accentColor = toHex(parseColor(patch.accentColor)!)
+  if (patch.density && ['compact', 'comfortable', 'spacious'].includes(patch.density)) out.density = patch.density
+  if (patch.chatWidth && ['narrow', 'normal', 'wide'].includes(patch.chatWidth)) out.chatWidth = patch.chatWidth
+  if (patch.chatSync && ['off', 'auto'].includes(patch.chatSync)) out.chatSync = patch.chatSync
+  if (patch.personality && typeof patch.personality === 'object') {
+    const p = patch.personality
+    const current = store.settings.personality
+    out.personality = {
+      preset: ['default', 'concise', 'friendly', 'pragmatic', 'teacher', 'custom'].includes(p.preset) ? p.preset : current.preset,
+      custom: typeof p.custom === 'string' ? p.custom.slice(0, 4000) : current.custom,
+      providers: Array.isArray(p.providers) ? p.providers.filter((x): x is ProviderId => PROVIDERS.includes(x)) : current.providers,
+      importedFrom: typeof p.importedFrom === 'string' ? p.importedFrom.slice(0, 120) : p.importedFrom === undefined ? current.importedFrom : undefined
+    }
   }
   for (const key of ['claudePath', 'codexPath', 'backupDir', 'browserHome'] as const) {
     if (typeof patch[key] === 'string') out[key] = (patch[key] as string).trim()
@@ -299,7 +494,13 @@ function inBackupDir(file: string): boolean {
 function handlers(): HandlerMap {
   return {
     app: {
-      info: () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), fake: FAKE, home: homedir() }),
+      info: () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), fake: FAKE, home: homedir(), chatsDir: chatsDir() }),
+      addProject: (path: string) => {
+        if (typeof path !== 'string' || !existsSync(path) || !statSync(path).isDirectory()) throw new Error('That folder does not exist.')
+        if (path !== chatsDir() && !store.settings.projects.includes(path)) store.updateSettings({ projects: [path, ...store.settings.projects].slice(0, 200) })
+        return path
+      },
+      isFolder: (path: string) => typeof path === 'string' && existsSync(path) && statSync(path).isDirectory(),
       openExternal: async (url: string) => {
         if (typeof url === 'string' && /^(https?:|mailto:)/i.test(url)) await shell.openExternal(url)
       },
@@ -322,7 +523,10 @@ function handlers(): HandlerMap {
     },
     threads: {
       list: () => orchestrator.list(),
-      get: (id: string) => orchestrator.get(id),
+      get: async (id: string) => {
+        if (store.getMeta(id)?.lazy) await orchestrator.hydrate(id, loadSource)
+        return orchestrator.get(id)
+      },
       create: (input) => {
         if (!input || typeof input.cwd !== 'string' || !existsSync(input.cwd) || !statSync(input.cwd).isDirectory()) throw new Error('Pick an existing project folder first.')
         if (input.provider && !PROVIDERS.includes(input.provider)) throw new Error('Unknown provider')
@@ -335,9 +539,14 @@ function handlers(): HandlerMap {
         return orchestrator.update(id, patch ?? {})
       },
       remove: (id: string) => orchestrator.remove(id),
-      send: (id: string, input) => {
-        if (!input || typeof input.text !== 'string' || !Array.isArray(input.attachments)) throw new Error('Invalid message')
-        return orchestrator.send(id, input)
+      send: async (id: string, input: SendInput) => {
+        const clean = cleanSendInput(input)
+        if (store.getMeta(id)?.lazy) await orchestrator.hydrate(id, loadSource)
+        return orchestrator.send(id, clean)
+      },
+      compact: async (id: string) => {
+        if (store.getMeta(id)?.lazy) await orchestrator.hydrate(id, loadSource)
+        return orchestrator.compact(id)
       },
       stop: (id: string) => orchestrator.stop(id),
       respond: (id: string, itemId: string, decision) => orchestrator.respond(id, itemId, decision),
@@ -350,7 +559,70 @@ function handlers(): HandlerMap {
         await refreshProviders(true, id)
         return Promise.all(PROVIDERS.map((p) => adapters[p].status(false)))
       },
-      commands: (id: ProviderId, cwd: string) => (PROVIDERS.includes(id) ? adapters[id].commands(cwd) : [])
+      commands: (id: ProviderId, cwd: string) => (PROVIDERS.includes(id) ? adapters[id].commands(cwd) : []),
+      login: async (id: ProviderId) => {
+        if (id === 'codex' && adapters.codex instanceof CodexAdapter) {
+          const url = await adapters.codex.login((ok, message) => {
+            broadcast({ type: 'login-finished', provider: 'codex', ok, message })
+            void refreshProviders(true, 'codex')
+          })
+          await shell.openExternal(url)
+          return { kind: 'browser' as const, url, message: 'Finish signing in to ChatGPT in your browser, then come back here.' }
+        }
+        if (id === 'claude') return { kind: 'terminal' as const, command: CLAUDE_LOGIN_COMMAND, message: 'Sign in to Claude in the terminal below, then come back here.' }
+        throw new Error('Sign-in is not available here')
+      },
+      installCommand: (id: ProviderId) => INSTALL_COMMAND[id] ?? '',
+      loginStatus: async (id: ProviderId) => {
+        if (id === 'claude' && adapters.claude instanceof ClaudeAdapter) return adapters.claude.loginStatus()
+        const status = await adapters[id]?.status(true).catch(() => null)
+        return !!status?.installed && status.loggedIn !== false
+      }
+    },
+    themes: {
+      generate: async (prompt: string, provider?: ProviderId) => generateTheme(String(prompt ?? ''), await themeAgents(), provider && PROVIDERS.includes(provider) ? provider : store.settings.defaultProvider)
+    },
+    personality: {
+      importFromClaude: () => readClaudePersonality(claudeHome())
+    },
+    usage: {
+      summary: async (days: number) => {
+        const sessions = new Set<string>()
+        for (const meta of orchestrator.list()) for (const p of PROVIDERS) if (meta.native[p] && !meta.lazy) sessions.add(`${p}:${meta.native[p]!.id}`)
+        const summary = usage.summary(Number(days) || 14, sessions, store.settings.usageIncludeOutside)
+        const account = await codexAccount().catch(() => null)
+        if (account) summary.codexAccount = { lifetimeTokens: account.lifetimeTokens, peakDailyTokens: account.peakDailyTokens, currentStreakDays: account.currentStreakDays, longestStreakDays: account.longestStreakDays }
+        return summary
+      },
+      rescan: () => usage.scan()
+    },
+    storage: {
+      stats: (keep: string[]) => storageStats(storageContext(), Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []),
+      clean: async (keep: string[]) => {
+        const ctx = storageContext()
+        const files = [...(await unusedAttachments(ctx, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : [])), ...oldSafetyCopies(ctx)]
+        let count = 0
+        let bytes = 0
+        for (const f of files) {
+          try {
+            await shell.trashItem(f.path)
+            count++
+            bytes += f.bytes
+          } catch {
+            // in use or already gone
+          }
+        }
+        return { files: count, bytes }
+      }
+    },
+    cli: {
+      status: () => cliStatus(getEnv().PATH),
+      install: () => {
+        if (!app.isPackaged && !process.env.DUET_CLI_DIR) throw new Error('The duet command runs the installed app — install Duet in Applications first.')
+        const bundle = app.getPath('exe').replace(/\/Contents\/MacOS\/[^/]+$/, '')
+        return installCli(bundle, getEnv().PATH)
+      },
+      uninstall: () => uninstallCli(getEnv().PATH)
     },
     attachments: {
       fromBytes: (name: string, mime: string, bytes: Uint8Array) => attachmentFromBytes(store.attachmentsDir, String(name), String(mime), bytes),
@@ -536,7 +808,8 @@ function handlers(): HandlerMap {
           meta.native = {}
         }
         return orchestrator.insert(meta, loaded.items)
-      }
+      },
+      syncAll: () => syncChats()
     },
     browser: {
       capture: async (webContentsId: number, rect?: { x: number; y: number; width: number; height: number }) => {
@@ -647,6 +920,17 @@ async function bootstrap(): Promise<void> {
   store = new Store(app.getPath('userData'))
   nativeTheme.themeSource = store.settings.theme
   mkdirSync(store.settings.backupDir, { recursive: true })
+  mkdirSync(chatsDir(), { recursive: true })
+  cliToken()
+  // Tests of the packaged app must not make a throwaway build the Mac's handler for duet:// links.
+  if (app.isPackaged && process.env.DUET_E2E !== '1') app.setAsDefaultProtocolClient('duet')
+  usage = new UsageService(
+    join(app.getPath('userData'), 'cache', 'usage-v1.json'),
+    () => ({ claudeProjects: join(claudeHome(), 'projects'), codexRoots: [join(codexHome(), 'sessions'), join(codexHome(), 'archived_sessions')] }),
+    join(__dirname, 'usageWorker.js'),
+    () => broadcast({ type: 'usage-updated' }),
+    log
+  )
 
   protocol.handle(FILE_PROTOCOL, async (request) => {
     try {
@@ -673,7 +957,10 @@ async function bootstrap(): Promise<void> {
     notify,
     onBadge: setBadge,
     onLimits: (provider) => {
-      void adapters[provider].status(false).then((status) => broadcast({ type: 'provider-status', status }))
+      void adapters[provider].status(false).then((status) => {
+        broadcast({ type: 'provider-status', status })
+        writeLimitsCache()
+      })
     },
     injectHandoff: async (provider, req, handoff, emit) => {
       const codex = adapters.codex
@@ -694,7 +981,15 @@ async function bootstrap(): Promise<void> {
   lockDownBrowserSession()
   buildMenu()
   createWindow()
+  mainWindow?.webContents.once('did-finish-load', () => {
+    linksReady = true
+    for (const url of pendingLinks.splice(0)) void handleDeepLink(url)
+  })
+  mainWindow?.on('focus', () => autoSyncChats())
+  if (process.env.DUET_E2E === '1') (globalThis as unknown as { __duetOpenUrl: typeof handleDeepLink }).__duetOpenUrl = handleDeepLink
   void refreshProviders(false)
+  setTimeout(() => autoSyncChats(), 4000).unref?.()
+  setInterval(() => autoSyncChats(), 10 * 60_000).unref?.()
   setTimeout(() => void runAutoBackupIfDue(), 60_000).unref?.()
   setInterval(() => void runAutoBackupIfDue(), 60 * 60_000).unref?.()
 }

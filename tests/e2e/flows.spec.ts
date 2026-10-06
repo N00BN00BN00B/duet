@@ -24,6 +24,11 @@ async function waitIdle(page: Page) {
   await expect(page.getByTestId('send-button')).toBeVisible({ timeout: 30_000 })
 }
 
+/** History, MCP, Sync and Backups live under "More" in the sidebar. */
+async function openMore(page: Page) {
+  if (!(await page.getByTestId('nav-history').isVisible())) await page.getByTestId('nav-more').click()
+}
+
 function seedHome(home: string) {
   // A Claude session transcript and some config so History / MCP / Sync have data.
   const project = join(home, 'Projects', 'demo-app')
@@ -396,6 +401,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
 
   test('Sync: copies instructions and skills to Codex', async () => {
     const { page, home } = ctx
+    await openMore(page)
     await page.getByTestId('nav-sync').click()
     await expect(page.getByTestId('sync-view')).toBeVisible()
     await expect(page.locator('[data-testid="sync-row"]').first()).toBeVisible()
@@ -409,6 +415,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
 
   test('Backups: create a backup archive', async () => {
     const { page, home } = ctx
+    await openMore(page)
     await page.getByTestId('nav-backups').click()
     await expect(page.getByTestId('backups-view')).toBeVisible()
     await expect(page.getByTestId('backup-set-claude-config')).toBeVisible()
@@ -438,6 +445,7 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
 
   test('History: imports a Claude session and continues it', async () => {
     const { page } = ctx
+    await openMore(page)
     await page.getByTestId('nav-history').click()
     await expect(page.getByTestId('history-view')).toBeVisible()
     await expect(page.locator('[data-testid="history-row"]')).toHaveCount(1)
@@ -458,11 +466,13 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await expect(page.getByTestId('settings-view')).toBeVisible()
     await expect(page.getByTestId('agent-card-claude')).toBeVisible()
     await shot(page, '11-settings')
+    await page.getByTestId('nav-customize').click()
+    await expect(page.getByTestId('customize-view')).toBeVisible()
     await page.getByRole('radio', { name: 'Light' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
     await page.locator('[data-testid="thread-row"]').first().click()
     await shot(page, '12-thread-light')
-    await page.getByTestId('nav-settings').click()
+    await page.getByTestId('nav-customize').click()
     await page.getByRole('radio', { name: 'Dark' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   })
