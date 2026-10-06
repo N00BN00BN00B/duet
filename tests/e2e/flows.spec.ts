@@ -213,6 +213,51 @@ test.describe.serial('Duet end-to-end (demo agents)', () => {
     await page.getByTestId('toggle-browser').click()
   })
 
+  test('thread menu: rename, pin, fork, archive and unarchive', async () => {
+    const { page } = ctx
+    const row = page.locator('[data-testid="thread-row"]').first()
+    // Rename by double-clicking the header title.
+    await page.getByTestId('thread-title').dblclick()
+    const titleInput = page.locator('header input')
+    await titleInput.fill('Renamed thread')
+    await titleInput.press('Enter')
+    await expect(page.getByTestId('thread-title')).toHaveText('Renamed thread')
+    await expect(row).toContainText('Renamed thread')
+    // Pin via the context menu.
+    await row.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Pin to top' }).click()
+    await expect(page.getByText('Pinned', { exact: true })).toBeVisible()
+    // Fork creates a second thread with the same conversation.
+    await row.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Fork thread' }).click()
+    await expect(page.getByTestId('thread-title')).toHaveText('Renamed thread (fork)')
+    await expect(page.getByTestId('timeline')).toContainText('Hello from the automated suite')
+    // Archive the fork, then bring it back.
+    const fork = page.locator('[data-testid="thread-row"]').filter({ hasText: '(fork)' })
+    await fork.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Archive' }).click()
+    await expect(fork).toHaveCount(0)
+    await page.getByRole('button', { name: /Archived \(1\)/ }).click()
+    await expect(fork).toHaveCount(1)
+    await fork.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Unarchive' }).click()
+    await page.getByRole('button', { name: 'Back', exact: true }).click()
+    await expect(page.locator('[data-testid="thread-row"]')).toHaveCount(2)
+    // Delete the fork so later tests see the original thread only.
+    await fork.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Delete…' }).click()
+    await page.getByRole('button', { name: 'Delete thread' }).click()
+    await expect(page.locator('[data-testid="thread-row"]')).toHaveCount(1)
+    // Unpin and restore the original title for the remaining tests.
+    await row.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Unpin' }).click()
+    await row.click()
+    await page.getByTestId('thread-title').dblclick()
+    await page.locator('header input').fill('Hello from the automated suite')
+    await page.locator('header input').press('Enter')
+    await expect(page.getByTestId('thread-title')).toHaveText('Hello from the automated suite')
+  })
+
   test('command palette opens threads and actions', async () => {
     const { page } = ctx
     await page.keyboard.press('Meta+k')
